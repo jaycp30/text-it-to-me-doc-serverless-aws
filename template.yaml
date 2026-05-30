@@ -58,7 +58,7 @@ Resources:
           - AllowedHeaders: ["*"]
             AllowedMethods: [GET, PUT]
             # Tighten this to your Amplify URL after first deploy
-            AllowedOrigins: ["*"]
+            AllowedOrigins: ["https://main.d3bj6u7583ielg.amplifyapp.com"]
             MaxAge: 3600
       LifecycleConfiguration:
         Rules:
@@ -150,7 +150,7 @@ Resources:
       StageName: v1
       CorsConfiguration:
         AllowOrigins:
-          - "*"  # tighten to your Amplify URL after first deploy
+          - "https://main.d3bj6u7583ielg.amplifyapp.com"  # tighten to your Amplify URL after first deploy
         AllowMethods:
           - GET
           - POST
