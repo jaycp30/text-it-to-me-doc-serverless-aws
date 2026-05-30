@@ -549,6 +549,11 @@ function normalizePrescriptionResponse(payload) {
   };
 }
 
+function errorFromPayload(payload, fallback) {
+  if (!payload || typeof payload !== 'object') return fallback;
+  return [payload.error, payload.detail].filter(Boolean).join(' — ') || fallback;
+}
+
 function offsetDay(n) {
   const d = new Date();
   d.setDate(d.getDate() + n);
@@ -2204,8 +2209,9 @@ export default function App() {
               contentType: file.type || 'image/jpeg',
             }),
           });
-          if (!urlRes.ok) throw new Error((await urlRes.json()).error || 'Could not create upload URL');
-          const { uploadUrl, imageKey } = await urlRes.json();
+          const urlPayload = await urlRes.json();
+          if (!urlRes.ok) throw new Error(errorFromPayload(urlPayload, 'Could not create upload URL'));
+          const { uploadUrl, imageKey } = urlPayload;
 
           const putRes = await fetch(uploadUrl, {
             method: 'PUT', body: file,
@@ -2227,7 +2233,7 @@ export default function App() {
           }),
         });
         const processPayload = await procRes.json();
-        if (!procRes.ok) throw new Error(processPayload.error || 'Could not process prescription');
+        if (!procRes.ok) throw new Error(errorFromPayload(processPayload, 'Could not process prescription'));
         parsed = normalizePrescriptionResponse(processPayload);
 
       } else {
