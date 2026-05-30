@@ -289,6 +289,7 @@ function useIsDesktop(breakpoint = 900) {
 const API_BASE    = import.meta.env.VITE_API_BASE_URL || '';
 const ANTH_KEY    = import.meta.env.VITE_ANTHROPIC_KEY || '';
 const PREVIEW     = !API_BASE;
+const GITHUB_URL  = 'https://github.com/jaycp30/text-it-to-me-doc-serverless-aws';
 
 const PARSE_SYSTEM = `You are an expert medical prescription parser. You know all medical shorthand, ditto marks, tapering regimens, and handwritten notation.
 
@@ -614,9 +615,13 @@ function NavBar({ screen, onBack }) {
         }}>Text it To Me Doc</span>
       </div>
 
-      {/* Right — settings */}
-      <button
-        aria-label="Settings"
+      {/* Right — GitHub contact/source */}
+      <a
+        href={GITHUB_URL}
+        target="_blank"
+        rel="noreferrer"
+        aria-label="Open project on GitHub"
+        title="Questions? Open the GitHub repo"
         className="icon-well-pressable"
         style={{
           width: 38, height: 38, borderRadius: '50%',
@@ -625,7 +630,7 @@ function NavBar({ screen, onBack }) {
           display: 'flex', alignItems: 'center', justifyContent: 'center',
           transition: 'all var(--tr)',
         }}
-      ><Icon name="sliders" size={18} /></button>
+      ><Icon name="github" size={18} /></a>
     </nav>
   );
 }
@@ -698,12 +703,26 @@ function Sidebar({ screen, tab, setTab, onNewRx, onChat }) {
         </p>
       )}
 
-      {/* Settings pinned to bottom */}
-      <div style={{ marginTop: 'auto', width: '100%', display: 'flex', justifyContent: 'center' }}>
-        <button className="nav-item" title="Settings" aria-label="Settings">
-          <Icon name="sliders" size={18} strokeWidth={2} />
-          <span className="sidebar-label">Settings</span>
-        </button>
+      {/* Project link pinned to bottom */}
+      <div style={{ marginTop: 'auto', width: '100%', display: 'flex', justifyContent: 'center', flexDirection: 'column', gap: 8 }}>
+        <a
+          className="nav-item"
+          href={GITHUB_URL}
+          target="_blank"
+          rel="noreferrer"
+          title="Questions? Open the GitHub repo"
+          aria-label="Open project on GitHub"
+          style={{ textDecoration: 'none' }}
+        >
+          <Icon name="github" size={18} strokeWidth={2} />
+          <span className="sidebar-label">Questions?</span>
+        </a>
+        <span className="sidebar-label" style={{
+          padding: '0 13px', fontSize: 11, color: 'var(--text3)', lineHeight: 1.35,
+          wordBreak: 'break-word',
+        }}>
+          github.com/jaycp30/text-it-to-me-doc-serverless-aws
+        </span>
       </div>
     </aside>
   );
