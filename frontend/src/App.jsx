@@ -517,12 +517,19 @@ function describeFrequency(med, times) {
 
 function normalizePrescriptionResponse(payload) {
   const source = payload?.prescription || payload || {};
+  const allDoseDates = (source.medications || [])
+    .flatMap(med => med.doses || [])
+    .map(dose => dose.date)
+    .filter(Boolean)
+    .sort();
+
   const medications = (source.medications || []).map((med, i) => {
-    const times = [...new Set((med.doses || []).map(d => formatDoseTime(d.time)).filter(Boolean))];
+    const rawDoses = med.doses || [];
+    const times = [...new Set(rawDoses.map(d => formatDoseTime(d.time)).filter(Boolean))];
     const dose = med.dose_mg
       ? `${med.dose_mg}mg`
-      : med.doses?.[0]?.amount
-        ? `${med.doses[0].amount} ${med.doses[0].unit || ''}`.trim()
+      : rawDoses[0]?.amount
+        ? `${rawDoses[0].amount} ${rawDoses[0].unit || ''}`.trim()
         : med.dose || '';
 
     return {
@@ -534,10 +541,11 @@ function normalizePrescriptionResponse(payload) {
       duration: med.duration || (med.duration_days ? `${med.duration_days} days` : med.end_date ? `Until ${med.end_date}` : null),
       durationDays: med.durationDays || med.duration_days || null,
       times,
+      doses: rawDoses,
       prn: med.prn ?? med.schedule_type === 'prn',
       prnMaxPerDay: med.prnMaxPerDay || null,
       taper: med.taper || null,
-      instructions: med.instructions || med.special_instructions || med.doses?.[0]?.instruction || '',
+      instructions: med.instructions || med.special_instructions || rawDoses[0]?.instruction || '',
       refills: med.refills || 0,
       color: med.color || ['sage', 'lav', 'peach'][i % 3],
     };
@@ -547,6 +555,8 @@ function normalizePrescriptionResponse(payload) {
     ...source,
     patientName: source.patientName || source.patient || null,
     prescribedDate: source.prescribedDate || source.prescription_date || null,
+    originalScheduleStartDate: source.originalScheduleStartDate || allDoseDates[0] || source.prescribedDate || source.prescription_date || null,
+    scheduleStartDate: source.scheduleStartDate || allDoseDates[0] || source.prescribedDate || source.prescription_date || null,
     prescriber: source.prescriber || source.doctor || null,
     medications,
     notes: source.notes || payload?.message || null,
@@ -569,15 +579,92 @@ function timeSortValue(time) {
   return hour * 60 + minute;
 }
 
-function buildTodayDoses(rx) {
+function dateFromYmd(value) {
+  if (!value) return null;
+  const [year, month, day] = String(value).split('-').map(Number);
+  if (!year || !month || !day) return null;
+  return new Date(year, month - 1, day);
+}
+
+function ymdFromDate(date = new Date()) {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
+
+function daysBetween(startDate, targetDate) {
+  const start = new Date(startDate.getFullYear(), startDate.getMonth(), startDate.getDate());
+  const target = new Date(targetDate.getFullYear(), targetDate.getMonth(), targetDate.getDate());
+  return Math.floor((target - start) / 86400000);
+}
+
+function addDaysYmd(value, days) {
+  const date = dateFromYmd(value);
+  if (!date) return null;
+  date.setDate(date.getDate() + days);
+  return ymdFromDate(date);
+}
+
+function defaultScheduleStartDate(rx) {
+  return rx?.scheduleStartDate || rx?.prescribedDate || ymdFromDate();
+}
+
+function taperDoseForDay(taper = [], dayIndex = 0) {
+  let cursor = 0;
+  for (const step of taper) {
+    const length = Number(step.durationDays || 1);
+    if (dayIndex >= cursor && dayIndex < cursor + length) return step.dose;
+    cursor += length;
+  }
+  return null;
+}
+
+function doseForMedOnDay(med, dayIndex) {
+  if (dayIndex < 0) return null;
+  if (med.taper?.length) return taperDoseForDay(med.taper, dayIndex);
+  if (med.durationDays && dayIndex >= Number(med.durationDays)) return null;
+  return med.dose || '';
+}
+
+function doseLabelFromRawDose(dose, med) {
+  if (dose.amount) return `${dose.amount} ${dose.unit || ''}`.trim();
+  return med.dose || '';
+}
+
+function buildDosesForDate(rx, targetDate = new Date(), scheduleStartDate = defaultScheduleStartDate(rx)) {
+  const startDate = dateFromYmd(scheduleStartDate) || new Date();
+  const dayIndex = daysBetween(startDate, targetDate);
+  const originalStartDate = rx?.originalScheduleStartDate || rx?.prescribedDate || scheduleStartDate;
+  const shiftedSourceDate = addDaysYmd(originalStartDate, dayIndex);
+
   return (rx?.medications || [])
     .flatMap((med, medIndex) => {
+      if (med.prn) return [];
+
+      const datedDoses = (med.doses || []).filter(dose => dose.date && !dose.as_needed);
+      if (datedDoses.length && shiftedSourceDate) {
+        return datedDoses
+          .filter(dose => dose.date === shiftedSourceDate && dose.time)
+          .map((dose, doseIndex) => ({
+            id: `${ymdFromDate(targetDate)}-${med.id || medIndex}-${dose.time}-${doseIndex}`,
+            time: formatDoseTime(dose.time),
+            med: med.name,
+            dose: doseLabelFromRawDose(dose, med),
+            color: med.color || ['sage', 'lav', 'peach'][medIndex % 3],
+            taken: false,
+          }));
+      }
+
       const times = med.times?.length ? med.times : [];
+      const dose = doseForMedOnDay(med, dayIndex);
+      if (!times.length || dose === null) return [];
+
       return times.map((time, timeIndex) => ({
-        id: `${med.id || medIndex}-${time}-${timeIndex}`,
+        id: `${ymdFromDate(targetDate)}-${med.id || medIndex}-${time}-${timeIndex}`,
         time,
         med: med.name,
-        dose: med.taper?.[0]?.dose || med.dose || '',
+        dose,
         color: med.color || ['sage', 'lav', 'peach'][medIndex % 3],
         taken: false,
       }));
@@ -1577,9 +1664,7 @@ function Notice({ icon = 'alert', title = 'Reminder', children, tone = 'peach', 
 /* ─────────────────────────────────────────────────────────────────────────────
    UPCOMING TAB
 ───────────────────────────────────────────────────────────────────────────── */
-function UpcomingTab({ rx }) {
-  const meds = (rx?.medications || MOCK_RX.medications).filter(m => !m.prn);
-
+function UpcomingTab({ rx, scheduleStartDate }) {
   const dayLabels = [
     'Today', 'Tomorrow', 'In 2 days', 'In 3 days', 'In 4 days', 'In 5 days', 'In 6 days',
   ];
@@ -1594,6 +1679,7 @@ function UpcomingTab({ rx }) {
       <div className="card-grid card-grid--two" style={{ marginBottom: 16 }}>
       {dayLabels.map((label, i) => {
         const date = offsetDay(i);
+        const doses = buildDosesForDate(rx, date, scheduleStartDate);
         return (
           <div key={i}>
             {/* Day header */}
@@ -1611,9 +1697,9 @@ function UpcomingTab({ rx }) {
             </div>
 
             {/* Med rows */}
-            {meds.map(m => (
+            {doses.length > 0 ? doses.map(dose => (
               <div
-                key={m.id}
+                key={dose.id}
                 className="glass"
                 style={{
                   borderRadius: 'var(--r-lg)', padding: '11px 13px',
@@ -1622,28 +1708,34 @@ function UpcomingTab({ rx }) {
               >
                 <div style={{
                   width: 9, height: 9, borderRadius: '50%',
-                  background: cv(m.color), flexShrink: 0,
+                  background: cv(dose.color), flexShrink: 0,
                 }} />
                 <div style={{ flex: 1, minWidth: 0 }}>
                   <p style={{
                     fontFamily: 'var(--font-head)', fontWeight: 600,
                     fontSize: 13, color: 'var(--text)', marginBottom: 1,
-                  }}>{m.name}</p>
-                  <p style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: cv(m.color) }}>
-                    {m.taper ? `${m.taper[Math.min(i, m.taper.length - 1)].dose}` : m.dose}
-                    {m.times.length > 0 && ` · ${m.times.join(', ')}`}
+                  }}>{dose.med}</p>
+                  <p style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: cv(dose.color) }}>
+                    {dose.dose}{dose.time && ` · ${dose.time}`}
                   </p>
                 </div>
               </div>
-            ))}
+            )) : (
+              <p style={{
+                fontSize: 12, color: 'var(--text2)', lineHeight: 1.5,
+                padding: '8px 2px 12px',
+              }}>
+                No timed doses.
+              </p>
+            )}
           </div>
         );
       })}
       </div>
 
-      <p style={{ fontSize: 12, color: 'var(--text3)', lineHeight: 1.6, textAlign: 'center', marginTop: 4 }}>
+      <Notice style={{ marginTop: 4 }}>
         Schedule generated from your prescription. Verify with your pharmacist.
-      </p>
+      </Notice>
     </div>
   );
 }
@@ -1652,7 +1744,8 @@ function UpcomingTab({ rx }) {
    SCHEDULE SCREEN
 ───────────────────────────────────────────────────────────────────────────── */
 function ScheduleScreen({ rx, tab, setTab, showTabBar = true }) {
-  const [doses, setDoses]       = useState(() => buildTodayDoses(rx));
+  const [scheduleStartDate, setScheduleStartDate] = useState(() => defaultScheduleStartDate(rx));
+  const [doses, setDoses] = useState(() => buildDosesForDate(rx, new Date(), defaultScheduleStartDate(rx)));
 
   const tabs = [
     { id: 'today',    label: 'Today',       icon: 'sun'      },
@@ -1661,8 +1754,12 @@ function ScheduleScreen({ rx, tab, setTab, showTabBar = true }) {
   ];
 
   useEffect(() => {
-    setDoses(buildTodayDoses(rx));
+    setScheduleStartDate(defaultScheduleStartDate(rx));
   }, [rx]);
+
+  useEffect(() => {
+    setDoses(buildDosesForDate(rx, new Date(), scheduleStartDate));
+  }, [rx, scheduleStartDate]);
 
   const doneCt  = doses.filter(d => d.taken).length;
   const totalCt = doses.length;
@@ -1730,6 +1827,52 @@ function ScheduleScreen({ rx, tab, setTab, showTabBar = true }) {
         </div>
       </div>
 
+      {/* Timetable adjustment */}
+      <div
+        className="glass anim-fade-up"
+        style={{
+          margin: '0 20px 18px',
+          borderRadius: 'var(--r-lg)',
+          padding: '14px',
+          display: 'flex',
+          alignItems: 'center',
+          gap: 12,
+          flexWrap: 'wrap',
+        }}
+      >
+        <div style={{ flex: '1 1 220px', minWidth: 0 }}>
+          <p style={{
+            fontFamily: 'var(--font-head)', fontWeight: 700,
+            fontSize: 14, color: 'var(--text)', marginBottom: 2,
+          }}>
+            Adjust timetable
+          </p>
+          <p style={{ fontSize: 12, color: 'var(--text2)', lineHeight: 1.45 }}>
+            Change the date you actually started taking these meds.
+          </p>
+        </div>
+        <label style={{ display: 'block', flex: '0 0 180px' }}>
+          <span style={{
+            display: 'block', fontFamily: 'var(--font-head)', fontWeight: 600,
+            fontSize: 11, color: 'var(--text2)', marginBottom: 5,
+          }}>
+            Started on
+          </span>
+          <input
+            type="date"
+            value={scheduleStartDate}
+            onChange={e => setScheduleStartDate(e.target.value || ymdFromDate())}
+            style={{
+              width: '100%', padding: '10px 11px',
+              borderRadius: 'var(--r-md)',
+              background: 'var(--bg2)',
+              border: '1px solid var(--glass-line)',
+              fontSize: 13,
+            }}
+          />
+        </label>
+      </div>
+
       {/* Tab bar — mobile only; desktop uses the sidebar nav */}
       {showTabBar && (
       <div style={{
@@ -1789,7 +1932,7 @@ function ScheduleScreen({ rx, tab, setTab, showTabBar = true }) {
 
         {tab === 'upcoming' && (
           <div className="anim-fade-up">
-            <UpcomingTab rx={rx} />
+            <UpcomingTab rx={rx} scheduleStartDate={scheduleStartDate} />
           </div>
         )}
 
