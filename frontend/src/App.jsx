@@ -293,18 +293,18 @@ const GITHUB_URL  = 'https://github.com/jaycp30/text-it-to-me-doc-serverless-aws
 const MAX_UPLOAD_IMAGES = 5;
 
 const TIMEZONE_OPTIONS = [
-  { value: 'Asia/Manila', label: 'Manila, Philippines' },
-  { value: 'Europe/London', label: 'London, United Kingdom' },
-  { value: 'Asia/Tokyo', label: 'Tokyo, Japan' },
-  { value: 'America/Edmonton', label: 'Edmonton, Alberta, Canada' },
-  { value: 'Asia/Kuala_Lumpur', label: 'Kuala Lumpur, Malaysia' },
-  { value: 'Asia/Ho_Chi_Minh', label: 'Vietnam' },
-  { value: 'Europe/Stockholm', label: 'Sweden' },
-  { value: 'Europe/Warsaw', label: 'Poland' },
-  { value: 'Asia/Dubai', label: 'Dubai, UAE' },
-  { value: 'Europe/Berlin', label: 'Germany' },
-  { value: 'America/New_York', label: 'New York, United States' },
-  { value: 'America/Los_Angeles', label: 'Los Angeles, United States' },
+  { value: 'Asia/Manila', label: 'Asia/Manila, PH' },
+  { value: 'Europe/London', label: 'Europe/London, UK' },
+  { value: 'Asia/Tokyo', label: 'Asia/Tokyo, JP' },
+  { value: 'America/Edmonton', label: 'America/Edmonton, CA' },
+  { value: 'Asia/Kuala_Lumpur', label: 'Asia/Kuala_Lumpur, MY' },
+  { value: 'Asia/Ho_Chi_Minh', label: 'Asia/Ho_Chi_Minh, VN' },
+  { value: 'Europe/Stockholm', label: 'Europe/Stockholm, SE' },
+  { value: 'Europe/Warsaw', label: 'Europe/Warsaw, PL' },
+  { value: 'Asia/Dubai', label: 'Asia/Dubai, AE' },
+  { value: 'Europe/Berlin', label: 'Europe/Berlin, DE' },
+  { value: 'America/New_York', label: 'America/New_York, US' },
+  { value: 'America/Los_Angeles', label: 'America/Los_Angeles, US' },
 ];
 
 const PARSE_SYSTEM = `You are an expert medical prescription parser. You know all medical shorthand, ditto marks, tapering regimens, and handwritten notation.
