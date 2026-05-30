@@ -246,6 +246,13 @@ Resources:
       Environment:
         Variables:
           SES_FROM_EMAIL: !Ref SesFromEmail
+      Events:
+        TestNotification:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref RxApi
+            Path: /notify-test
+            Method: POST
 
   # ── Lambda: daily morning summary ─────────────────────────────────────────
   # Option B — scans all active schedules, sends "today's meds" summary

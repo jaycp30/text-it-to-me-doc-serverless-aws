@@ -292,6 +292,21 @@ const PREVIEW     = !API_BASE;
 const GITHUB_URL  = 'https://github.com/jaycp30/text-it-to-me-doc-serverless-aws';
 const MAX_UPLOAD_IMAGES = 5;
 
+const TIMEZONE_OPTIONS = [
+  { value: 'Asia/Manila', label: 'Manila, Philippines' },
+  { value: 'Europe/London', label: 'London, United Kingdom' },
+  { value: 'Asia/Tokyo', label: 'Tokyo, Japan' },
+  { value: 'America/Edmonton', label: 'Edmonton, Alberta, Canada' },
+  { value: 'Asia/Kuala_Lumpur', label: 'Kuala Lumpur, Malaysia' },
+  { value: 'Asia/Ho_Chi_Minh', label: 'Vietnam' },
+  { value: 'Europe/Stockholm', label: 'Sweden' },
+  { value: 'Europe/Warsaw', label: 'Poland' },
+  { value: 'Asia/Dubai', label: 'Dubai, UAE' },
+  { value: 'Europe/Berlin', label: 'Germany' },
+  { value: 'America/New_York', label: 'New York, United States' },
+  { value: 'America/Los_Angeles', label: 'Los Angeles, United States' },
+];
+
 const PARSE_SYSTEM = `You are an expert medical prescription parser. You know all medical shorthand, ditto marks, tapering regimens, and handwritten notation.
 
 Parse the prescription image and return ONLY a valid JSON object — no markdown fences, no explanation:
@@ -866,17 +881,18 @@ function HomeScreen({ onUpload }) {
   const [previews, setPreviews] = useState([]);
   const [dragOver, setDragOver] = useState(false);
   const [loading, setLoading]   = useState(false);
+  const [testLoading, setTestLoading] = useState(false);
+  const [testStatus, setTestStatus] = useState('');
   const [reminderDetails, setReminderDetails] = useState(getStoredReminderDetails);
   const [formError, setFormError] = useState('');
 
+  const browserTimezone = getBrowserTimezone();
   const timezoneOptions = [
-    getBrowserTimezone(),
-    'Asia/Manila',
-    'Europe/London',
-    'Asia/Tokyo',
-    'America/New_York',
-    'America/Los_Angeles',
-  ].filter((tz, index, all) => tz && all.indexOf(tz) === index);
+    ...(!TIMEZONE_OPTIONS.some(option => option.value === browserTimezone)
+      ? [{ value: browserTimezone, label: `Current browser timezone (${browserTimezone})` }]
+      : []),
+    ...TIMEZONE_OPTIONS,
+  ];
 
   useEffect(() => {
     return () => previews.forEach(previewUrl => URL.revokeObjectURL(previewUrl));
@@ -889,6 +905,7 @@ function HomeScreen({ onUpload }) {
       return next;
     });
     setFormError('');
+    setTestStatus('');
   }
 
   function clearFiles() {
@@ -928,6 +945,42 @@ function HomeScreen({ onUpload }) {
       contactInfo: reminderDetails.contactInfo.trim(),
     });
     setLoading(false);
+  }
+
+  async function handleTestNotification() {
+    const error = validateReminderDetails(reminderDetails);
+    if (error) {
+      setFormError(error);
+      return;
+    }
+    if (!API_BASE) {
+      setFormError('Test notifications need the deployed backend API.');
+      return;
+    }
+
+    setTestLoading(true);
+    setTestStatus('');
+    setFormError('');
+
+    try {
+      const res = await fetch(`${API_BASE}/notify-test`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          type: 'test',
+          userId: reminderDetails.userId,
+          notificationMethod: reminderDetails.notificationMethod,
+          contactInfo: reminderDetails.contactInfo.trim(),
+        }),
+      });
+      const payload = await res.json();
+      if (!res.ok) throw new Error(errorFromPayload(payload, 'Could not send test notification'));
+      setTestStatus(`Test ${reminderDetails.notificationMethod === 'sms' ? 'SMS' : 'email'} sent.`);
+    } catch (err) {
+      setFormError(err.message || 'Could not send test notification.');
+    } finally {
+      setTestLoading(false);
+    }
   }
 
   const steps = [
@@ -1132,9 +1185,37 @@ function HomeScreen({ onUpload }) {
                 fontSize: 14,
               }}
             >
-              {timezoneOptions.map(tz => <option key={tz} value={tz}>{tz}</option>)}
+              {timezoneOptions.map(tz => <option key={tz.value} value={tz.value}>{tz.label}</option>)}
             </select>
           </label>
+
+          <button
+            type="button"
+            onClick={handleTestNotification}
+            disabled={testLoading}
+            style={{
+              width: '100%', marginTop: 12, padding: '12px 13px',
+              borderRadius: 'var(--r-full)',
+              background: testLoading ? 'var(--bg3)' : 'var(--lav-lt)',
+              color: testLoading ? 'var(--text3)' : 'var(--lav)',
+              fontFamily: 'var(--font-head)', fontWeight: 600, fontSize: 13,
+              display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8,
+              border: '1px solid rgba(155,142,196,0.25)',
+            }}
+          >
+            {testLoading
+              ? <><Spinner size={15} color="var(--lav)" /> Sending test…</>
+              : <><Icon name="message" size={16} strokeWidth={2} /> Send test notification</>}
+          </button>
+
+          {testStatus && (
+            <p style={{
+              color: 'var(--sage)', fontSize: 12, marginTop: 10,
+              lineHeight: 1.45, fontWeight: 600,
+            }}>
+              {testStatus}
+            </p>
+          )}
 
           {formError && (
             <p style={{ color: 'var(--danger)', fontSize: 12, marginTop: 10, lineHeight: 1.45 }}>

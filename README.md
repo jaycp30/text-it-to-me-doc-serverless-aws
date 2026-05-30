@@ -286,6 +286,14 @@ Both enable TTL on the `expiresAt` attribute, so records auto-delete one year af
 
 `NotifyUser` sends one reminder per invocation, choosing the channel from `notificationMethod` (`"sms"` or `"email"`).
 
+The frontend reminder details panel also has a **Send test notification** button. It calls:
+
+```text
+POST /notify-test
+```
+
+That route invokes the same `NotifyUser` Lambda with `type: "test"`, so you can verify the selected email address or phone number immediately before waiting for a scheduled medication reminder.
+
 **Email (SES).** The sender is the verified `SesFromEmail`. The `jaycloud.net` domain is verified in `ap-northeast-1`, so any `@jaycloud.net` address works as a sender. Confirm production access:
 
 ```bash
@@ -310,6 +318,8 @@ aws sns get-sms-sandbox-account-status --region ap-northeast-1
 ```
 
 Philippines (+63) delivery is carrier-dependent — test with your own number first.
+
+Supported timezone presets in the UI include Manila, London, Tokyo, Edmonton, Kuala Lumpur, Vietnam, Sweden, Poland, Dubai, Germany, New York, and Los Angeles. These are stored as IANA timezone IDs such as `America/Edmonton`, `Asia/Kuala_Lumpur`, and `Europe/Berlin`.
 
 ## API Gateway Routes
 

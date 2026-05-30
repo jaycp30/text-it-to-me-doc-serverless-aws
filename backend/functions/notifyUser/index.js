@@ -18,6 +18,29 @@ const ses = new SESClient({});
 
 const SES_FROM_EMAIL = process.env.SES_FROM_EMAIL || "noreply@rxreader.app";
 
+const RESPONSE_HEADERS = {
+  "Content-Type": "application/json",
+  "Access-Control-Allow-Origin": "*",
+};
+
+function isHttpEvent(event) {
+  return Boolean(event?.requestContext?.http);
+}
+
+function response(statusCode, payload, http = true) {
+  if (!http) return { statusCode, body: typeof payload === "string" ? payload : JSON.stringify(payload) };
+  return {
+    statusCode,
+    headers: RESPONSE_HEADERS,
+    body: JSON.stringify(payload),
+  };
+}
+
+function getPayload(event) {
+  if (!isHttpEvent(event)) return event;
+  return JSON.parse(event.body || "{}");
+}
+
 // ─── Message formatters ───────────────────────────────────────────────────────
 
 function formatDoseMessage(dose) {
@@ -44,6 +67,11 @@ function formatDailySummaryMessage(doses) {
   });
 
   return `Good morning! Today's medications:\n\n${lines.join("\n")}\n\nStay healthy — RxReader`;
+}
+
+function formatTestMessage(method) {
+  const channel = method === "sms" ? "SMS" : "email";
+  return `RxReader test: Your ${channel} medication reminders are working. Future dose reminders will be sent here.`;
 }
 
 // ─── Send functions ───────────────────────────────────────────────────────────
@@ -110,20 +138,22 @@ async function sendEmail(emailAddress, subject, bodyText) {
 // ─── Handler ──────────────────────────────────────────────────────────────────
 module.exports.handler = async (event) => {
   console.log("NotifyUser event:", JSON.stringify(event, null, 2));
+  const http = isHttpEvent(event);
 
   try {
+    const payload = getPayload(event);
     const {
       userId,
       notificationMethod, // "sms" | "email"
       contactInfo,        // phone number or email
       dose,               // single dose object (Option A)
       doses,              // array of dose objects (Option B daily summary)
-      type,               // "dose" | "daily_summary"
-    } = event;
+      type,               // "dose" | "daily_summary" | "test"
+    } = payload;
 
     if (!contactInfo) {
       console.error("No contactInfo provided — cannot send notification");
-      return { statusCode: 400, body: "contactInfo required" };
+      return response(400, { error: "contactInfo required" }, http);
     }
 
     const isSMS = notificationMethod === "sms";
@@ -131,7 +161,10 @@ module.exports.handler = async (event) => {
 
     let message, subject;
 
-    if (isDailySummary) {
+    if (type === "test") {
+      message = formatTestMessage(notificationMethod);
+      subject = "Test medication reminder — RxReader";
+    } else if (isDailySummary) {
       message = formatDailySummaryMessage(doses);
       subject = "Your medications for today — RxReader";
     } else if (dose) {
@@ -139,7 +172,7 @@ module.exports.handler = async (event) => {
       subject = `Medication reminder: ${dose.medication}`;
     } else {
       console.error("No dose or doses provided");
-      return { statusCode: 400, body: "dose or doses required" };
+      return response(400, { error: "dose or doses required" }, http);
     }
 
     if (isSMS) {
@@ -149,12 +182,15 @@ module.exports.handler = async (event) => {
     }
 
     console.log(`[${userId}] Notification sent via ${notificationMethod}`);
-    return { statusCode: 200, body: "sent" };
+    return response(200, {
+      ok: true,
+      message: type === "test" ? `Test ${notificationMethod || "email"} sent` : "Notification sent",
+    }, http);
 
   } catch (error) {
     console.error("Notification error:", error);
     // Don't throw — EventBridge will retry if we return an error,
     // which could spam the user. Log and move on.
-    return { statusCode: 500, body: error.message };
+    return response(500, { error: error.message }, http);
   }
 };
