@@ -1,8 +1,31 @@
 node_modules/
 dist/
 build/
-.DS_Store
+
+# SAM
 .aws-sam/
 .env
 .env.local
 *.log
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Node
+node_modules/
+npm-debug.log*
+
+# Lambda build artifact
+lambda.zip
+
+# Local env overrides
+.env
+.env.local
+
+# Session handoff files
+handoff_*.md
+
+# Claude Code local config
+.claude/
