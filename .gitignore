@@ -1,8 +1,21 @@
+# Dependencies
 node_modules/
+
+# Build output
 dist/
 build/
-.DS_Store
+
+# SAM local build artifacts
 .aws-sam/
+
+# Environment / secrets
 .env
 .env.local
+.env.*.local
+
+# Logs
 *.log
+npm-debug.log*
+
+# OS files
+.DS_Store
