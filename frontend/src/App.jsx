@@ -338,7 +338,7 @@ Rules:
 • Max ~3 short paragraphs per reply.
 • You are not a doctor — always remind users to verify with their pharmacist or prescriber.`;
 
-/* ── Mock data (used in demo mode or on API error) ── */
+/* ── Mock data (used only in explicit demo mode) ── */
 const MOCK_RX = {
   patientName: 'Alex',
   prescribedDate: new Date().toISOString().slice(0, 10),
@@ -1186,6 +1186,63 @@ function ProcessingScreen() {
             {i === step && <Spinner size={15} color="var(--lav)" />}
           </div>
         ))}
+      </div>
+    </div>
+  );
+}
+
+function ProcessingErrorScreen({ error, onTryAgain }) {
+  return (
+    <div style={{ padding: '24px 20px 40px' }}>
+      <div
+        className="glass anim-fade-up"
+        style={{
+          borderRadius: 'var(--r-xl)',
+          padding: '24px 20px',
+          border: '1px solid rgba(232,92,92,0.28)',
+          background: 'var(--danger-lt)',
+        }}
+      >
+        <div className="icon-well" style={{
+          width: 52, height: 52, borderRadius: 'var(--r-lg)',
+          background: 'rgba(232,92,92,0.14)', color: 'var(--danger)',
+          marginBottom: 16,
+        }}><Icon name="alert" size={25} strokeWidth={2} /></div>
+
+        <p style={{
+          fontFamily: 'var(--font-head)', fontWeight: 700,
+          fontSize: 20, color: 'var(--text)', marginBottom: 8,
+        }}>
+          I couldn't read that prescription
+        </p>
+        <p style={{ fontSize: 14, color: 'var(--text2)', lineHeight: 1.65, marginBottom: 14 }}>
+          The app did not create a schedule from this upload. Try clearer screenshots, fewer pages, or check the backend logs if this keeps happening.
+        </p>
+
+        {error && (
+          <p style={{
+            fontFamily: 'var(--font-mono)', fontSize: 12, lineHeight: 1.55,
+            color: 'var(--danger)', background: 'rgba(255,255,255,0.44)',
+            border: '1px solid rgba(232,92,92,0.18)',
+            borderRadius: 'var(--r-md)', padding: '10px 12px', marginBottom: 16,
+            wordBreak: 'break-word',
+          }}>
+            {error}
+          </p>
+        )}
+
+        <button
+          onClick={onTryAgain}
+          style={{
+            width: '100%', padding: '14px', borderRadius: 'var(--r-full)',
+            background: 'var(--sage)', color: '#fff',
+            fontFamily: 'var(--font-head)', fontWeight: 600, fontSize: 15,
+            display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8,
+            boxShadow: 'var(--sh-btn-sage)',
+          }}
+        >
+          <Icon name="camera" size={18} strokeWidth={2} /> Try another upload
+        </button>
       </div>
     </div>
   );
@@ -2065,8 +2122,9 @@ function ChatDrawer({ open, onClose, rx, isDesktop = false }) {
    ROOT APP
 ───────────────────────────────────────────────────────────────────────────── */
 export default function App() {
-  const [screen, setScreen] = useState('home');    // 'home' | 'processing' | 'schedule'
+  const [screen, setScreen] = useState('home');    // 'home' | 'processing' | 'schedule' | 'error'
   const [rx,     setRx]     = useState(null);
+  const [processingError, setProcessingError] = useState('');
   const [chatOpen, setChatOpen] = useState(false);
   const [tab,    setTab]    = useState('today');    // schedule tab, lifted so sidebar can drive it
   const isDesktop = useIsDesktop();
@@ -2082,6 +2140,7 @@ export default function App() {
     }
 
     setScreen('processing');
+    setProcessingError('');
 
     try {
       let parsed;
@@ -2188,15 +2247,16 @@ export default function App() {
 
     } catch (err) {
       console.error('Prescription parse error:', err);
-      // Graceful fallback — show demo data rather than a blank error screen
-      setRx(MOCK_RX);
-      setScreen('schedule');
+      setRx(null);
+      setProcessingError(err.message || 'Unexpected prescription processing error');
+      setScreen('error');
     }
   }
 
   function handleBack() {
     setScreen('home');
     setRx(null);
+    setProcessingError('');
     setChatOpen(false);
     setTab('today');
   }
@@ -2206,6 +2266,7 @@ export default function App() {
     <>
       {screen === 'home'       && <HomeScreen onUpload={handleUpload} />}
       {screen === 'processing' && <ProcessingScreen />}
+      {screen === 'error'      && <ProcessingErrorScreen error={processingError} onTryAgain={handleBack} />}
       {screen === 'schedule'   && (
         <ScheduleScreen
           rx={rx}
