@@ -379,13 +379,6 @@ const MOCK_RX = {
   notes: 'Return for follow-up in 2 weeks.',
 };
 
-const MOCK_TODAY = [
-  { id: 'd0', time: '8:00 AM',  med: 'Prednisone',  dose: '40mg',  color: 'sage',  taken: true  },
-  { id: 'd1', time: '8:00 AM',  med: 'Amoxicillin', dose: '500mg', color: 'lav',   taken: true  },
-  { id: 'd2', time: '2:00 PM',  med: 'Amoxicillin', dose: '500mg', color: 'lav',   taken: false },
-  { id: 'd3', time: '8:00 PM',  med: 'Amoxicillin', dose: '500mg', color: 'lav',   taken: false },
-];
-
 const QUICK_QS = [
   'Can I take Amoxicillin with food?',
   'What if I miss a Prednisone dose?',
@@ -565,6 +558,33 @@ function errorFromPayload(payload, fallback) {
   return [payload.error, payload.detail].filter(Boolean).join(' — ') || fallback;
 }
 
+function timeSortValue(time) {
+  const match = String(time || '').match(/(\d+):(\d+)\s*(AM|PM)/i);
+  if (!match) return 9999;
+  let hour = Number(match[1]);
+  const minute = Number(match[2]);
+  const period = match[3].toUpperCase();
+  if (period === 'PM' && hour !== 12) hour += 12;
+  if (period === 'AM' && hour === 12) hour = 0;
+  return hour * 60 + minute;
+}
+
+function buildTodayDoses(rx) {
+  return (rx?.medications || [])
+    .flatMap((med, medIndex) => {
+      const times = med.times?.length ? med.times : [];
+      return times.map((time, timeIndex) => ({
+        id: `${med.id || medIndex}-${time}-${timeIndex}`,
+        time,
+        med: med.name,
+        dose: med.taper?.[0]?.dose || med.dose || '',
+        color: med.color || ['sage', 'lav', 'peach'][medIndex % 3],
+        taken: false,
+      }));
+    })
+    .sort((a, b) => timeSortValue(a.time) - timeSortValue(b.time));
+}
+
 function offsetDay(n) {
   const d = new Date();
   d.setDate(d.getDate() + n);
@@ -729,13 +749,18 @@ function Sidebar({ screen, tab, setTab, onNewRx, onChat }) {
           rel="noreferrer"
           title="Questions? Open the GitHub repo"
           aria-label="Open project on GitHub"
-          style={{ textDecoration: 'none' }}
+          style={{
+            textDecoration: 'none',
+            background: 'rgba(155,142,196,0.18)',
+            color: 'var(--text)',
+            border: '1px solid rgba(155,142,196,0.28)',
+          }}
         >
           <Icon name="github" size={18} strokeWidth={2} />
           <span className="sidebar-label">Questions?</span>
         </a>
         <span className="sidebar-label" style={{
-          padding: '0 13px', fontSize: 11, color: 'var(--text3)', lineHeight: 1.35,
+          padding: '0 13px', fontSize: 11, color: 'var(--text2)', lineHeight: 1.35,
           wordBreak: 'break-word',
         }}>
           github.com/jaycp30/text-it-to-me-doc-serverless-aws
@@ -1524,6 +1549,31 @@ function DoseCard({ dose, onToggle, isLast }) {
   );
 }
 
+function Notice({ icon = 'alert', title = 'Reminder', children, tone = 'peach', style }) {
+  const accent = tone === 'sage' ? 'var(--sage)' : 'var(--peach)';
+  const bg = tone === 'sage' ? 'rgba(94,126,104,0.24)' : 'rgba(232,146,124,0.22)';
+
+  return (
+    <div style={{
+      padding: '12px 14px', borderRadius: 'var(--r-lg)',
+      background: bg,
+      border: `1px solid ${tone === 'sage' ? 'rgba(94,126,104,0.42)' : 'rgba(232,146,124,0.42)'}`,
+      display: 'flex', alignItems: 'flex-start', gap: 11,
+      boxShadow: 'var(--sh-card)',
+      ...style,
+    }}>
+      <div className="icon-well" style={{
+        width: 28, height: 28, borderRadius: 9, marginTop: 1,
+        background: 'rgba(255,255,255,0.14)', color: accent,
+      }}><Icon name={icon} size={16} strokeWidth={2} /></div>
+      <p style={{ fontSize: 13, color: 'var(--text)', lineHeight: 1.6, fontWeight: 500 }}>
+        {title && <strong style={{ color: accent }}>{title}: </strong>}
+        {children}
+      </p>
+    </div>
+  );
+}
+
 /* ─────────────────────────────────────────────────────────────────────────────
    UPCOMING TAB
 ───────────────────────────────────────────────────────────────────────────── */
@@ -1537,21 +1587,9 @@ function UpcomingTab({ rx }) {
   return (
     <div>
       {/* Disclaimer */}
-      <div style={{
-        padding: '12px 14px', borderRadius: 'var(--r-lg)',
-        background: 'var(--peach-lt)', border: '1px solid rgba(232,146,124,0.22)',
-        marginBottom: 20,
-        display: 'flex', alignItems: 'flex-start', gap: 11,
-      }}>
-        <div className="icon-well" style={{
-          width: 26, height: 26, borderRadius: 8, marginTop: 1,
-          background: 'rgba(232,146,124,0.18)', color: 'var(--peach)',
-        }}><Icon name="alert" size={15} strokeWidth={2} /></div>
-        <p style={{ fontSize: 12, color: 'var(--text2)', lineHeight: 1.65 }}>
-          <strong style={{ color: 'var(--peach)' }}>Reminder:</strong> Always take medications
-          exactly as prescribed. Contact your doctor if anything seems off.
-        </p>
-      </div>
+      <Notice style={{ marginBottom: 20 }}>
+        Always take medications exactly as prescribed. Contact your doctor if anything seems off.
+      </Notice>
 
       <div className="card-grid card-grid--two" style={{ marginBottom: 16 }}>
       {dayLabels.map((label, i) => {
@@ -1614,7 +1652,7 @@ function UpcomingTab({ rx }) {
    SCHEDULE SCREEN
 ───────────────────────────────────────────────────────────────────────────── */
 function ScheduleScreen({ rx, tab, setTab, showTabBar = true }) {
-  const [doses, setDoses]       = useState(MOCK_TODAY);
+  const [doses, setDoses]       = useState(() => buildTodayDoses(rx));
 
   const tabs = [
     { id: 'today',    label: 'Today',       icon: 'sun'      },
@@ -1622,9 +1660,13 @@ function ScheduleScreen({ rx, tab, setTab, showTabBar = true }) {
     { id: 'meds',     label: 'Medications', icon: 'pill'     },
   ];
 
+  useEffect(() => {
+    setDoses(buildTodayDoses(rx));
+  }, [rx]);
+
   const doneCt  = doses.filter(d => d.taken).length;
   const totalCt = doses.length;
-  const allDone = doneCt === totalCt;
+  const allDone = totalCt > 0 && doneCt === totalCt;
 
   function toggle(id) {
     setDoses(ds => ds.map(d => d.id === id ? { ...d, taken: !d.taken } : d));
@@ -1671,7 +1713,7 @@ function ScheduleScreen({ rx, tab, setTab, showTabBar = true }) {
             <div style={{
               height: '100%', borderRadius: 'var(--r-full)',
               background: '#fff',
-              width: `${(doneCt / totalCt) * 100}%`,
+              width: `${totalCt ? (doneCt / totalCt) * 100 : 0}%`,
               transition: 'width 0.65s cubic-bezier(0.16,1,0.3,1)',
             }} />
           </div>
@@ -1681,6 +1723,8 @@ function ScheduleScreen({ rx, tab, setTab, showTabBar = true }) {
           }}>
             {allDone
               ? <><Icon name="check" size={14} strokeWidth={2.4} /> All done for today — great job!</>
+              : totalCt === 0
+                ? 'No timed doses for today'
               : `${totalCt - doneCt} dose${totalCt - doneCt !== 1 ? 's' : ''} left`}
           </p>
         </div>
@@ -1723,21 +1767,23 @@ function ScheduleScreen({ rx, tab, setTab, showTabBar = true }) {
       <div style={{ padding: '0 20px' }}>
         {tab === 'today' && (
           <div className="anim-fade-up today-wrap">
-            {doses.map((d, i) => (
-              <DoseCard
-                key={d.id}
-                dose={d}
-                onToggle={toggle}
-                isLast={i === doses.length - 1}
-              />
-            ))}
-            <p style={{
-              fontSize: 12, color: 'var(--text3)', textAlign: 'center',
-              lineHeight: 1.6, marginTop: 16,
-            }}>
-              Schedule generated from your prescription image.
-              Always verify with your pharmacist.
-            </p>
+            {doses.length > 0 ? (
+              doses.map((d, i) => (
+                <DoseCard
+                  key={d.id}
+                  dose={d}
+                  onToggle={toggle}
+                  isLast={i === doses.length - 1}
+                />
+              ))
+            ) : (
+              <Notice icon="calendar" title="No timed doses" tone="sage" style={{ marginTop: 6 }}>
+                This prescription did not produce fixed dose times for today.
+              </Notice>
+            )}
+            <Notice style={{ marginTop: 16 }}>
+              Schedule generated from your prescription image. Always verify with your pharmacist.
+            </Notice>
           </div>
         )}
 
