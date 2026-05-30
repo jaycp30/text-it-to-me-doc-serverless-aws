@@ -4,9 +4,9 @@
  * processPrescription/index.js
  *
  * Flow:
- *   1. Receive imageKey + user context from frontend
- *   2. Fetch prescription image from S3
- *   3. Send image to Bedrock Claude → get structured JSON
+ *   1. Receive imageKey/imageKeys + user context from frontend
+ *   2. Fetch prescription image(s) from S3
+ *   3. Send image(s) to Bedrock Claude → get structured JSON
  *   4. Save prescription to DynamoDB
  *   5. Create per-dose EventBridge Scheduler rules (Option A)
  *   6. Save full schedule to DynamoDB (for Option B daily summary)
@@ -20,6 +20,8 @@ const { S3Client, GetObjectCommand } = require("@aws-sdk/client-s3");
 const { SchedulerClient, CreateScheduleCommand } = require("@aws-sdk/client-scheduler");
 const { DateTime } = require("luxon");
 const { randomUUID } = require("crypto");
+
+const MAX_IMAGES = 5;
 
 // ─── AWS clients ─────────────────────────────────────────────────────────────
 const bedrock   = new BedrockRuntimeClient({ region: process.env.AWS_REGION });
@@ -123,10 +125,19 @@ async function getImageFromS3(imageKey) {
 }
 
 /**
- * Call Bedrock Claude with the prescription image.
+ * Call Bedrock Claude with the prescription image(s).
  * Returns raw text response (should be JSON string).
  */
-async function callBedrock(imageBase64, contentType) {
+async function callBedrock(images) {
+  const imageBlocks = images.map((image) => ({
+    type: "image",
+    source: {
+      type: "base64",
+      media_type: image.contentType,
+      data: image.base64,
+    },
+  }));
+
   const payload = {
     anthropic_version: "bedrock-2023-05-31",
     max_tokens: 4000,
@@ -135,17 +146,12 @@ async function callBedrock(imageBase64, contentType) {
       {
         role: "user",
         content: [
-          {
-            type: "image",
-            source: {
-              type: "base64",
-              media_type: contentType,
-              data: imageBase64,
-            },
-          },
+          ...imageBlocks,
           {
             type: "text",
-            text: "Read this prescription and extract all medication instructions into the JSON format specified. Be thorough — expand all ditto marks and shorthand.",
+            text: images.length > 1
+              ? "These images are pages or screenshots from the same prescription. Read them together in order and extract all medication instructions into the JSON format specified. Be thorough — expand all ditto marks and shorthand."
+              : "Read this prescription and extract all medication instructions into the JSON format specified. Be thorough — expand all ditto marks and shorthand.",
           },
         ],
       },
@@ -259,7 +265,9 @@ module.exports.handler = async (event) => {
     const body = JSON.parse(event.body || "{}");
 
     const {
-      imageKey,          // S3 key of the uploaded prescription image
+      imageKey,          // S3 key of the uploaded prescription image (legacy single-image path)
+      imageKeys,         // S3 keys of uploaded prescription images (multi-page path)
+      uploadId,          // shared S3 prefix segment for one prescription upload
       userId,            // Cognito user sub (unique per user)
       userTimezone,      // IANA timezone string e.g. "Asia/Manila"
       notificationMethod,// "sms" | "email"
@@ -267,19 +275,21 @@ module.exports.handler = async (event) => {
     } = body;
 
     // ── Validation ────────────────────────────────────────────────────────
-    if (!imageKey)  return { statusCode: 400, headers, body: JSON.stringify({ error: "imageKey is required" }) };
+    const keys = Array.isArray(imageKeys) ? imageKeys : imageKey ? [imageKey] : [];
+    if (!keys.length) return { statusCode: 400, headers, body: JSON.stringify({ error: "imageKey or imageKeys is required" }) };
+    if (keys.length > MAX_IMAGES) return { statusCode: 400, headers, body: JSON.stringify({ error: `A maximum of ${MAX_IMAGES} images can be processed at once` }) };
     if (!userId)    return { statusCode: 400, headers, body: JSON.stringify({ error: "userId is required" }) };
     if (!contactInfo) return { statusCode: 400, headers, body: JSON.stringify({ error: "contactInfo (phone or email) is required" }) };
 
     const timezone = userTimezone || "Asia/Manila";
 
-    // ── Step 1: Get image from S3 ─────────────────────────────────────────
-    console.log(`[${userId}] Fetching image: ${imageKey}`);
-    const { base64, contentType } = await getImageFromS3(imageKey);
+    // ── Step 1: Get image(s) from S3 ──────────────────────────────────────
+    console.log(`[${userId}] Fetching ${keys.length} image(s): ${keys.join(", ")}`);
+    const images = await Promise.all(keys.map(getImageFromS3));
 
     // ── Step 2: Call Bedrock Claude ───────────────────────────────────────
     console.log(`[${userId}] Calling Bedrock (model: ${BEDROCK_MODEL_ID})`);
-    const rawResponse = await callBedrock(base64, contentType);
+    const rawResponse = await callBedrock(images);
     console.log(`[${userId}] Raw Bedrock response:`, rawResponse.substring(0, 200));
 
     let prescription;
@@ -308,7 +318,9 @@ module.exports.handler = async (event) => {
       Item: {
         userId,
         prescriptionId,
-        imageKey,
+        imageKey: keys[0],
+        imageKeys: keys,
+        uploadId,
         prescription,
         createdAt: now,
         expiresAt: ttlOneYear(),

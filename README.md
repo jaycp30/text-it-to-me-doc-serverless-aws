@@ -56,11 +56,11 @@ EventBridge cron (hourly)        → DailySummary Lambda → NotifyUser ──�
 
 ## How The App Works
 
-1. The user opens the Amplify-hosted site and either tries **demo mode** (a built-in sample prescription) or uploads a photo of a real prescription.
-2. For a real upload, the frontend calls `POST /upload-url` and receives a short-lived presigned S3 URL plus an `imageKey`.
-3. The browser `PUT`s the image bytes directly to S3 using that URL, so the image never passes through Lambda or API Gateway payload limits.
-4. The frontend calls `POST /process` with the `imageKey`, a local browser profile ID, timezone, notification method, and contact info.
-5. `ProcessPrescription` fetches the image from S3 and sends it to Amazon Bedrock, which returns the medications and dose times as structured JSON.
+1. The user opens the Amplify-hosted site and either tries **demo mode** (a built-in sample prescription) or uploads 1-5 photos/screenshots of a real prescription.
+2. For a real upload, the frontend creates one `uploadId`, then calls `POST /upload-url` once per page and receives a short-lived presigned S3 URL plus an `imageKey`.
+3. The browser `PUT`s each image directly to S3 using those URLs, so the images never pass through Lambda or API Gateway payload limits.
+4. The frontend calls `POST /process` with `imageKeys`, `uploadId`, a local browser profile ID, timezone, notification method, and contact info.
+5. `ProcessPrescription` fetches the images from S3 and sends them together to Amazon Bedrock, which returns the medications and dose times as structured JSON.
 6. The Lambda stores the prescription and schedule in DynamoDB, then creates one EventBridge Scheduler rule per future dose (each fires once and auto-deletes).
 7. At each dose time, the Scheduler invokes `NotifyUser`, which sends an SMS (SNS) or email (SES) reminder for that dose — this is **Option A**, exact per-dose reminders.
 8. Independently, an hourly EventBridge cron invokes `DailySummary`, which scans active schedules and, when it is morning in the user's timezone, calls `NotifyUser` with a "today's medications" summary — this is **Option B**.
@@ -75,17 +75,25 @@ Prescription images are stored in the private S3 bucket created by the SAM stack
 rx-reader-images-441342223857
 ```
 
-The browser does not upload the image through Lambda. Instead, `GetUploadUrl` creates a short-lived presigned S3 `PUT` URL, and the browser uploads the image bytes directly to S3:
+The browser does not upload images through Lambda. Instead, `GetUploadUrl` creates short-lived presigned S3 `PUT` URLs, and the browser uploads each image directly to S3:
 
 ```text
 Browser
     → POST /upload-url
     → GetUploadUrl Lambda
     → presigned S3 PUT URL
-    → Browser uploads image directly to S3
+    → Browser uploads each image directly to S3
 ```
 
-After upload, `ProcessPrescription` reads the image from S3 and sends it to Bedrock Claude for extraction. The bucket blocks public access, so prescription images are not publicly browseable. A lifecycle rule moves images older than one year to Glacier storage for cheaper long-term retention.
+Multi-page uploads are grouped under one S3 prefix:
+
+```text
+<userId>/prescriptions/<uploadId>/page-1.jpg
+<userId>/prescriptions/<uploadId>/page-2.jpg
+<userId>/prescriptions/<uploadId>/page-3.jpg
+```
+
+After upload, `ProcessPrescription` reads the image(s) from S3 and sends up to 5 pages to Bedrock Claude in one request for extraction. The bucket blocks public access, so prescription images are not publicly browseable. A lifecycle rule moves images older than one year to Glacier storage for cheaper long-term retention.
 
 ### AI Model Roles
 
@@ -382,6 +390,11 @@ The hosted app can now collect reminder details and send the full `/process` bod
 ```json
 {
   "imageKey": "...",
+  "imageKeys": [
+    "local-.../prescriptions/rx-upload-.../page-1.jpg",
+    "local-.../prescriptions/rx-upload-.../page-2.jpg"
+  ],
+  "uploadId": "rx-upload-...",
   "userId": "local-...",
   "userTimezone": "Europe/London",
   "notificationMethod": "email",
@@ -392,6 +405,7 @@ The hosted app can now collect reminder details and send the full `/process` bod
 Current limitations:
 
 - **Local browser profile only.** `userId` is generated in the browser and stored in localStorage. This is fine for the learning build, but it is not a production identity system.
+- **Five-image upload cap.** The UI and backend intentionally limit one processing run to 5 prescription pages/screenshots to control cost and processing time.
 - **SMS sandbox.** SNS SMS still delivers only to verified sandbox destination numbers until sandbox restrictions are removed.
 - **Email reminders require real recipient details.** SES is production-enabled, but the user must enter a valid email address in the reminder details form.
 

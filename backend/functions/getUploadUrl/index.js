@@ -10,9 +10,9 @@
  * keeps API Gateway payload limits from being an issue.
  *
  * Flow:
- *   Frontend → POST /upload-url → gets { uploadUrl, imageKey }
+ *   Frontend → POST /upload-url → gets { uploadUrl, imageKey, uploadId }
  *   Frontend → PUT uploadUrl (with image bytes) → image in S3
- *   Frontend → POST /process { imageKey, ... } → prescription processed
+ *   Frontend → POST /process { imageKeys, uploadId, ... } → prescription processed
  */
 
 const { S3Client, PutObjectCommand } = require("@aws-sdk/client-s3");
@@ -32,6 +32,16 @@ const ALLOWED_CONTENT_TYPES = [
   "image/webp",
 ];
 
+const MAX_PAGE_NUMBER = 5;
+
+function safeSegment(value) {
+  return String(value || "")
+    .replace(/[^a-zA-Z0-9-_]/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-|-$/g, "")
+    .substring(0, 120);
+}
+
 module.exports.handler = async (event) => {
   const headers = {
     "Content-Type": "application/json",
@@ -40,7 +50,7 @@ module.exports.handler = async (event) => {
 
   try {
     const body = JSON.parse(event.body || "{}");
-    const { userId, contentType } = body;
+    const { userId, contentType, uploadId, pageNumber } = body;
 
     if (!userId) {
       return { statusCode: 400, headers, body: JSON.stringify({ error: "userId required" }) };
@@ -56,10 +66,22 @@ module.exports.handler = async (event) => {
       };
     }
 
-    // Key format: userId/prescriptions/UUID.jpg
-    // Scoped to userId so we can use S3 prefix policies if needed
+    const page = Number(pageNumber || 1);
+    if (!Number.isInteger(page) || page < 1 || page > MAX_PAGE_NUMBER) {
+      return {
+        statusCode: 400,
+        headers,
+        body: JSON.stringify({ error: `pageNumber must be between 1 and ${MAX_PAGE_NUMBER}` }),
+      };
+    }
+
+    // Key format: userId/prescriptions/uploadId/page-N.ext
+    // S3 "folders" are prefixes; grouping pages under uploadId keeps one
+    // prescription's screenshots together for traceability.
     const ext = fileType.split("/")[1].replace("jpeg", "jpg");
-    const imageKey = `${userId}/prescriptions/${randomUUID()}.${ext}`;
+    const safeUserId = safeSegment(userId);
+    const safeUploadId = safeSegment(uploadId) || `rx-upload-${randomUUID()}`;
+    const imageKey = `${safeUserId}/prescriptions/${safeUploadId}/page-${page}.${ext}`;
 
     const command = new PutObjectCommand({
       Bucket: IMAGES_BUCKET,
@@ -73,7 +95,7 @@ module.exports.handler = async (event) => {
     return {
       statusCode: 200,
       headers,
-      body: JSON.stringify({ uploadUrl, imageKey }),
+      body: JSON.stringify({ uploadUrl, imageKey, uploadId: safeUploadId, pageNumber: page }),
     };
 
   } catch (error) {

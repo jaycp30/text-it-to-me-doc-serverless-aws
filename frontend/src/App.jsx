@@ -290,6 +290,7 @@ const API_BASE    = import.meta.env.VITE_API_BASE_URL || '';
 const ANTH_KEY    = import.meta.env.VITE_ANTHROPIC_KEY || '';
 const PREVIEW     = !API_BASE;
 const GITHUB_URL  = 'https://github.com/jaycp30/text-it-to-me-doc-serverless-aws';
+const MAX_UPLOAD_IMAGES = 5;
 
 const PARSE_SYSTEM = `You are an expert medical prescription parser. You know all medical shorthand, ditto marks, tapering regimens, and handwritten notation.
 
@@ -733,8 +734,8 @@ function Sidebar({ screen, tab, setTab, onNewRx, onChat }) {
 ───────────────────────────────────────────────────────────────────────────── */
 function HomeScreen({ onUpload }) {
   const fileRef   = useRef();
-  const [file, setFile]       = useState(null);
-  const [preview, setPreview] = useState(null);
+  const [files, setFiles]       = useState([]);
+  const [previews, setPreviews] = useState([]);
   const [dragOver, setDragOver] = useState(false);
   const [loading, setLoading]   = useState(false);
   const [reminderDetails, setReminderDetails] = useState(getStoredReminderDetails);
@@ -749,6 +750,10 @@ function HomeScreen({ onUpload }) {
     'America/Los_Angeles',
   ].filter((tz, index, all) => tz && all.indexOf(tz) === index);
 
+  useEffect(() => {
+    return () => previews.forEach(previewUrl => URL.revokeObjectURL(previewUrl));
+  }, [previews]);
+
   function updateReminderDetail(key, value) {
     setReminderDetails(prev => {
       const next = { ...prev, [key]: value };
@@ -758,20 +763,31 @@ function HomeScreen({ onUpload }) {
     setFormError('');
   }
 
-  function pickFile(f) {
-    if (!f || !f.type.startsWith('image/')) return;
-    setFile(f);
-    setPreview(URL.createObjectURL(f));
+  function clearFiles() {
+    previews.forEach(previewUrl => URL.revokeObjectURL(previewUrl));
+    setFiles([]);
+    setPreviews([]);
+  }
+
+  function pickFiles(fileList) {
+    const selected = Array.from(fileList || []).filter(f => f.type.startsWith('image/'));
+    if (!selected.length) return;
+
+    previews.forEach(previewUrl => URL.revokeObjectURL(previewUrl));
+    const limited = selected.slice(0, MAX_UPLOAD_IMAGES);
+    setFiles(limited);
+    setPreviews(limited.map(f => URL.createObjectURL(f)));
+    setFormError(selected.length > MAX_UPLOAD_IMAGES ? `Using the first ${MAX_UPLOAD_IMAGES} images.` : '');
   }
 
   function handleDrop(e) {
     e.preventDefault();
     setDragOver(false);
-    pickFile(e.dataTransfer.files[0]);
+    pickFiles(e.dataTransfer.files);
   }
 
   async function handleSubmit() {
-    if (!file && !preview) return;
+    if (!files.length) return;
     const error = validateReminderDetails(reminderDetails);
     if (error) {
       setFormError(error);
@@ -779,7 +795,7 @@ function HomeScreen({ onUpload }) {
     }
 
     setLoading(true);
-    await onUpload(file, {
+    await onUpload(files, {
       ...reminderDetails,
       contactInfo: reminderDetails.contactInfo.trim(),
     });
@@ -818,8 +834,8 @@ function HomeScreen({ onUpload }) {
         className="glass anim-fade-up"
         style={{
           borderRadius: 'var(--r-xl)',
-          border: `2px dashed ${dragOver ? 'var(--sage)' : preview ? 'var(--lav)' : 'var(--glass-line)'}`,
-          cursor: preview ? 'default' : 'pointer',
+          border: `2px dashed ${dragOver ? 'var(--sage)' : previews.length ? 'var(--lav)' : 'var(--glass-line)'}`,
+          cursor: previews.length ? 'default' : 'pointer',
           overflow: 'hidden', marginBottom: 14,
           minHeight: 200,
           display: 'flex', flexDirection: 'column',
@@ -827,19 +843,55 @@ function HomeScreen({ onUpload }) {
           transition: 'border-color var(--tr)',
           animationDelay: '0.08s',
         }}
-        onClick={() => !preview && fileRef.current?.click()}
+        onClick={() => !previews.length && fileRef.current?.click()}
         onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
         onDragLeave={() => setDragOver(false)}
         onDrop={handleDrop}
       >
-        {preview ? (
-          <div style={{ position: 'relative', width: '100%' }}>
-            <img
-              src={preview} alt="Prescription preview"
-              style={{ width: '100%', maxHeight: 280, objectFit: 'contain', display: 'block' }}
-            />
+        {previews.length ? (
+          <div style={{ position: 'relative', width: '100%', padding: 12 }}>
+            <p style={{
+              fontFamily: 'var(--font-head)', fontWeight: 600, fontSize: 13,
+              color: 'var(--text2)', marginBottom: 9, textAlign: 'center',
+            }}>
+              {files.length} of {MAX_UPLOAD_IMAGES} page{files.length > 1 ? 's' : ''} selected
+            </p>
+            <div style={{
+              display: 'grid',
+              gridTemplateColumns: previews.length === 1 ? '1fr' : 'repeat(2, minmax(0, 1fr))',
+              gap: 8,
+            }}>
+              {previews.map((preview, index) => (
+                <div key={preview} style={{
+                  position: 'relative',
+                  borderRadius: 'var(--r-md)',
+                  overflow: 'hidden',
+                  background: 'var(--bg2)',
+                  border: '1px solid var(--glass-line)',
+                }}>
+                  <img
+                    src={preview}
+                    alt={`Prescription page ${index + 1}`}
+                    style={{
+                      width: '100%',
+                      height: previews.length === 1 ? 260 : 138,
+                      objectFit: 'cover',
+                      display: 'block',
+                    }}
+                  />
+                  <span style={{
+                    position: 'absolute', left: 8, bottom: 8,
+                    padding: '3px 8px', borderRadius: 'var(--r-full)',
+                    background: 'rgba(0,0,0,0.55)', color: '#fff',
+                    fontFamily: 'var(--font-mono)', fontSize: 11,
+                  }}>
+                    Page {index + 1}
+                  </span>
+                </div>
+              ))}
+            </div>
             <button
-              onClick={(e) => { e.stopPropagation(); setPreview(null); setFile(null); }}
+              onClick={(e) => { e.stopPropagation(); clearFiles(); }}
               style={{
                 position: 'absolute', top: 10, right: 10,
                 width: 30, height: 30, borderRadius: '50%',
@@ -858,20 +910,20 @@ function HomeScreen({ onUpload }) {
             <p style={{
               fontFamily: 'var(--font-head)', fontWeight: 600, fontSize: 15,
               color: 'var(--text)', marginBottom: 4,
-            }}>Tap to upload prescription</p>
-            <p style={{ fontSize: 12, color: 'var(--text3)' }}>or drag &amp; drop — JPG, PNG, HEIC</p>
+            }}>Tap to upload prescription pages</p>
+            <p style={{ fontSize: 12, color: 'var(--text3)' }}>or drag &amp; drop up to {MAX_UPLOAD_IMAGES} images</p>
           </div>
         )}
       </div>
 
       <input
-        ref={fileRef} type="file" accept="image/*" capture="environment"
+        ref={fileRef} type="file" accept="image/*" multiple
         style={{ display: 'none' }}
-        onChange={(e) => pickFile(e.target.files[0])}
+        onChange={(e) => pickFiles(e.target.files)}
       />
 
       {/* Reminder details — required for real scheduling */}
-      {file && (
+      {files.length > 0 && (
         <div
           className="glass anim-fade-up"
           style={{
@@ -965,7 +1017,7 @@ function HomeScreen({ onUpload }) {
       )}
 
       {/* Primary CTA — only when file selected */}
-      {file && (
+      {files.length > 0 && (
         <button
           onClick={handleSubmit}
           disabled={loading}
@@ -983,12 +1035,12 @@ function HomeScreen({ onUpload }) {
         >
           {loading
             ? <><Spinner size={18} color="#fff" /> Reading prescription…</>
-            : <><Icon name="scan" size={19} strokeWidth={2} /> Read My Prescription</>}
+            : <><Icon name="scan" size={19} strokeWidth={2} /> Read {files.length > 1 ? `${files.length} Pages` : 'My Prescription'}</>}
         </button>
       )}
 
       {/* Demo CTA */}
-      {!file && (
+      {!files.length && (
         <button
           onClick={() => onUpload(null)}
           className="anim-fade-up"
@@ -2019,9 +2071,11 @@ export default function App() {
   const [tab,    setTab]    = useState('today');    // schedule tab, lifted so sidebar can drive it
   const isDesktop = useIsDesktop();
 
-  async function handleUpload(file, reminderDetails = getStoredReminderDetails()) {
+  async function handleUpload(filesOrFile, reminderDetails = getStoredReminderDetails()) {
+    const files = Array.isArray(filesOrFile) ? filesOrFile : filesOrFile ? [filesOrFile] : [];
+
     // Demo mode — skip processing
-    if (!file) {
+    if (!files.length) {
       setRx(MOCK_RX);
       setScreen('schedule');
       return;
@@ -2034,8 +2088,14 @@ export default function App() {
 
       if (PREVIEW && ANTH_KEY) {
         /* ── Preview mode: call Anthropic vision API directly ── */
-        const b64 = await fileToBase64(file);
-        const mime = file.type || 'image/jpeg';
+        const images = await Promise.all(files.map(async (file) => ({
+          type: 'image',
+          source: {
+            type: 'base64',
+            media_type: file.type || 'image/jpeg',
+            data: await fileToBase64(file),
+          },
+        })));
 
         const res = await fetch('https://api.anthropic.com/v1/messages', {
           method: 'POST',
@@ -2051,8 +2111,8 @@ export default function App() {
             messages: [{
               role: 'user',
               content: [
-                { type: 'image', source: { type: 'base64', media_type: mime, data: b64 } },
-                { type: 'text',  text: 'Parse this prescription and return the JSON.' },
+                ...images,
+                { type: 'text',  text: files.length > 1 ? 'Parse these prescription pages together and return the JSON.' : 'Parse this prescription and return the JSON.' },
               ],
             }],
           }),
@@ -2072,28 +2132,38 @@ export default function App() {
           notificationMethod: reminderDetails.notificationMethod,
           contactInfo: reminderDetails.contactInfo,
         };
+        const uploadId = `rx-upload-${globalThis.crypto?.randomUUID ? globalThis.crypto.randomUUID() : Date.now()}`;
 
-        const urlRes = await fetch(`${API_BASE}/upload-url`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            userId: uploadContext.userId,
-            contentType: file.type || 'image/jpeg',
-          }),
-        });
-        if (!urlRes.ok) throw new Error((await urlRes.json()).error || 'Could not create upload URL');
-        const { uploadUrl, imageKey } = await urlRes.json();
+        const uploaded = await Promise.all(files.map(async (file, index) => {
+          const urlRes = await fetch(`${API_BASE}/upload-url`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              userId: uploadContext.userId,
+              uploadId,
+              pageNumber: index + 1,
+              contentType: file.type || 'image/jpeg',
+            }),
+          });
+          if (!urlRes.ok) throw new Error((await urlRes.json()).error || 'Could not create upload URL');
+          const { uploadUrl, imageKey } = await urlRes.json();
 
-        await fetch(uploadUrl, {
-          method: 'PUT', body: file,
-          headers: { 'Content-Type': file.type || 'image/jpeg' },
-        });
+          const putRes = await fetch(uploadUrl, {
+            method: 'PUT', body: file,
+            headers: { 'Content-Type': file.type || 'image/jpeg' },
+          });
+          if (!putRes.ok) throw new Error(`Could not upload page ${index + 1}`);
+
+          return imageKey;
+        }));
 
         const procRes = await fetch(`${API_BASE}/process`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            imageKey,
+            imageKey: uploaded[0],
+            imageKeys: uploaded,
+            uploadId,
             ...uploadContext,
           }),
         });
