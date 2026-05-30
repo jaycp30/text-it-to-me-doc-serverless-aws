@@ -19,3 +19,7 @@ npm-debug.log*
 
 # OS files
 .DS_Store
+
+# Local-only: session handoffs and Claude workspace
+handoff_*.md
+.claude/
