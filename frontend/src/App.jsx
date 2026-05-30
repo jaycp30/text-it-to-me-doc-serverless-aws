@@ -175,7 +175,7 @@ const GLOBAL_CSS = `
   ::-webkit-scrollbar { width: 0; height: 0; }
   button  { cursor: pointer; border: none; background: none; }
   button:focus-visible { outline: 2px solid var(--lav); outline-offset: 2px; border-radius: 8px; }
-  input, textarea { font-family: var(--font-body); border: none; outline: none; background: none; }
+  input, textarea, select { font-family: var(--font-body); border: none; outline: none; background: none; color: var(--text); }
 
   /* ── Keyframes ── */
   @keyframes fadeUp {
@@ -423,6 +423,130 @@ function greeting() {
   return 'Good evening';
 }
 
+function getBrowserTimezone() {
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone || 'Asia/Manila';
+  } catch {
+    return 'Asia/Manila';
+  }
+}
+
+function getStoredUserId() {
+  const storageKey = 'rxreader.userId';
+  try {
+    const existing = localStorage.getItem(storageKey);
+    if (existing) return existing;
+    const id = `local-${globalThis.crypto?.randomUUID ? globalThis.crypto.randomUUID() : Date.now()}`;
+    localStorage.setItem(storageKey, id);
+    return id;
+  } catch {
+    return `local-${Date.now()}`;
+  }
+}
+
+function getStoredReminderDetails() {
+  const fallback = {
+    userId: getStoredUserId(),
+    notificationMethod: 'email',
+    contactInfo: '',
+    userTimezone: getBrowserTimezone(),
+  };
+
+  try {
+    return {
+      ...fallback,
+      ...JSON.parse(localStorage.getItem('rxreader.reminderDetails') || '{}'),
+      userId: fallback.userId,
+    };
+  } catch {
+    return fallback;
+  }
+}
+
+function saveReminderDetails(details) {
+  try {
+    localStorage.setItem('rxreader.reminderDetails', JSON.stringify({
+      notificationMethod: details.notificationMethod,
+      contactInfo: details.contactInfo,
+      userTimezone: details.userTimezone,
+    }));
+  } catch {
+    // Storage is a convenience only; uploading should still work if blocked.
+  }
+}
+
+function validateReminderDetails(details) {
+  const contact = details.contactInfo.trim();
+  if (!contact) return 'Enter where reminders should be sent.';
+  if (details.notificationMethod === 'email' && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(contact)) {
+    return 'Enter a valid email address.';
+  }
+  if (details.notificationMethod === 'sms' && !/^\+[1-9]\d{7,14}$/.test(contact)) {
+    return 'Use E.164 phone format, for example +639171234567.';
+  }
+  if (!details.userTimezone) return 'Choose your timezone.';
+  return '';
+}
+
+function formatDoseTime(time) {
+  if (!time) return null;
+  const [hourText, minute = '00'] = time.split(':');
+  const hour = Number(hourText);
+  if (Number.isNaN(hour)) return time;
+  const suffix = hour >= 12 ? 'PM' : 'AM';
+  const h12 = hour % 12 || 12;
+  return `${h12}:${minute.padStart(2, '0')} ${suffix}`;
+}
+
+function describeFrequency(med, times) {
+  if (med.schedule_type === 'prn') return 'As needed';
+  if (med.schedule_type === 'taper') return 'Tapering schedule';
+  if (times.length === 1) return 'Once daily';
+  if (times.length === 2) return 'Twice daily';
+  if (times.length === 3) return 'Three times daily';
+  if (times.length === 4) return 'Four times daily';
+  if (times.length > 4) return `${times.length} times daily`;
+  return med.schedule_type || 'Scheduled';
+}
+
+function normalizePrescriptionResponse(payload) {
+  const source = payload?.prescription || payload || {};
+  const medications = (source.medications || []).map((med, i) => {
+    const times = [...new Set((med.doses || []).map(d => formatDoseTime(d.time)).filter(Boolean))];
+    const dose = med.dose_mg
+      ? `${med.dose_mg}mg`
+      : med.doses?.[0]?.amount
+        ? `${med.doses[0].amount} ${med.doses[0].unit || ''}`.trim()
+        : med.dose || '';
+
+    return {
+      id: med.id || `med${i}`,
+      name: med.name || med.brand || `Medication ${i + 1}`,
+      dose,
+      frequency: med.frequency || describeFrequency(med, times),
+      frequencyCode: med.frequencyCode || (med.schedule_type || 'other').toUpperCase(),
+      duration: med.duration || (med.duration_days ? `${med.duration_days} days` : med.end_date ? `Until ${med.end_date}` : null),
+      durationDays: med.durationDays || med.duration_days || null,
+      times,
+      prn: med.prn ?? med.schedule_type === 'prn',
+      prnMaxPerDay: med.prnMaxPerDay || null,
+      taper: med.taper || null,
+      instructions: med.instructions || med.special_instructions || med.doses?.[0]?.instruction || '',
+      refills: med.refills || 0,
+      color: med.color || ['sage', 'lav', 'peach'][i % 3],
+    };
+  });
+
+  return {
+    ...source,
+    patientName: source.patientName || source.patient || null,
+    prescribedDate: source.prescribedDate || source.prescription_date || null,
+    prescriber: source.prescriber || source.doctor || null,
+    medications,
+    notes: source.notes || payload?.message || null,
+  };
+}
+
 function offsetDay(n) {
   const d = new Date();
   d.setDate(d.getDate() + n);
@@ -594,6 +718,26 @@ function HomeScreen({ onUpload }) {
   const [preview, setPreview] = useState(null);
   const [dragOver, setDragOver] = useState(false);
   const [loading, setLoading]   = useState(false);
+  const [reminderDetails, setReminderDetails] = useState(getStoredReminderDetails);
+  const [formError, setFormError] = useState('');
+
+  const timezoneOptions = [
+    getBrowserTimezone(),
+    'Asia/Manila',
+    'Europe/London',
+    'Asia/Tokyo',
+    'America/New_York',
+    'America/Los_Angeles',
+  ].filter((tz, index, all) => tz && all.indexOf(tz) === index);
+
+  function updateReminderDetail(key, value) {
+    setReminderDetails(prev => {
+      const next = { ...prev, [key]: value };
+      saveReminderDetails(next);
+      return next;
+    });
+    setFormError('');
+  }
 
   function pickFile(f) {
     if (!f || !f.type.startsWith('image/')) return;
@@ -609,8 +753,17 @@ function HomeScreen({ onUpload }) {
 
   async function handleSubmit() {
     if (!file && !preview) return;
+    const error = validateReminderDetails(reminderDetails);
+    if (error) {
+      setFormError(error);
+      return;
+    }
+
     setLoading(true);
-    await onUpload(file);
+    await onUpload(file, {
+      ...reminderDetails,
+      contactInfo: reminderDetails.contactInfo.trim(),
+    });
     setLoading(false);
   }
 
@@ -697,6 +850,100 @@ function HomeScreen({ onUpload }) {
         style={{ display: 'none' }}
         onChange={(e) => pickFile(e.target.files[0])}
       />
+
+      {/* Reminder details — required for real scheduling */}
+      {file && (
+        <div
+          className="glass anim-fade-up"
+          style={{
+            borderRadius: 'var(--r-xl)', padding: 16, marginBottom: 14,
+            animationDelay: '0.1s',
+          }}
+        >
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 14 }}>
+            <div className="icon-well" style={{
+              width: 38, height: 38, borderRadius: 'var(--r-md)',
+              background: 'var(--sage-lt)', color: 'var(--sage)',
+            }}><Icon name="sliders" size={19} /></div>
+            <div>
+              <p style={{ fontFamily: 'var(--font-head)', fontWeight: 700, fontSize: 15, color: 'var(--text)' }}>
+                Reminder details
+              </p>
+              <p style={{ fontSize: 12, color: 'var(--text2)', marginTop: 1 }}>
+                Used to schedule notifications after the prescription is read.
+              </p>
+            </div>
+          </div>
+
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginBottom: 12 }}>
+            {[
+              { id: 'email', label: 'Email' },
+              { id: 'sms', label: 'SMS' },
+            ].map(option => (
+              <button
+                key={option.id}
+                type="button"
+                onClick={() => updateReminderDetail('notificationMethod', option.id)}
+                style={{
+                  padding: '11px 12px', borderRadius: 'var(--r-md)',
+                  background: reminderDetails.notificationMethod === option.id ? 'var(--sage)' : 'var(--bg2)',
+                  color: reminderDetails.notificationMethod === option.id ? '#fff' : 'var(--text2)',
+                  fontFamily: 'var(--font-head)', fontWeight: 600, fontSize: 13,
+                  transition: 'all var(--tr)',
+                }}
+              >
+                {option.label}
+              </button>
+            ))}
+          </div>
+
+          <label style={{ display: 'block', marginBottom: 10 }}>
+            <span style={{
+              display: 'block', fontFamily: 'var(--font-head)', fontWeight: 600,
+              fontSize: 12, color: 'var(--text2)', marginBottom: 6,
+            }}>
+              {reminderDetails.notificationMethod === 'email' ? 'Email address' : 'Phone number'}
+            </span>
+            <input
+              value={reminderDetails.contactInfo}
+              onChange={e => updateReminderDetail('contactInfo', e.target.value)}
+              inputMode={reminderDetails.notificationMethod === 'sms' ? 'tel' : 'email'}
+              placeholder={reminderDetails.notificationMethod === 'email' ? 'you@example.com' : '+639171234567'}
+              style={{
+                width: '100%', padding: '12px 13px', borderRadius: 'var(--r-md)',
+                background: 'var(--bg2)', border: '1px solid var(--glass-line)',
+                fontSize: 14,
+              }}
+            />
+          </label>
+
+          <label style={{ display: 'block' }}>
+            <span style={{
+              display: 'block', fontFamily: 'var(--font-head)', fontWeight: 600,
+              fontSize: 12, color: 'var(--text2)', marginBottom: 6,
+            }}>
+              Timezone
+            </span>
+            <select
+              value={reminderDetails.userTimezone}
+              onChange={e => updateReminderDetail('userTimezone', e.target.value)}
+              style={{
+                width: '100%', padding: '12px 13px', borderRadius: 'var(--r-md)',
+                background: 'var(--bg2)', border: '1px solid var(--glass-line)',
+                fontSize: 14,
+              }}
+            >
+              {timezoneOptions.map(tz => <option key={tz} value={tz}>{tz}</option>)}
+            </select>
+          </label>
+
+          {formError && (
+            <p style={{ color: 'var(--danger)', fontSize: 12, marginTop: 10, lineHeight: 1.45 }}>
+              {formError}
+            </p>
+          )}
+        </div>
+      )}
 
       {/* Primary CTA — only when file selected */}
       {file && (
@@ -1753,7 +2000,7 @@ export default function App() {
   const [tab,    setTab]    = useState('today');    // schedule tab, lifted so sidebar can drive it
   const isDesktop = useIsDesktop();
 
-  async function handleUpload(file) {
+  async function handleUpload(file, reminderDetails = getStoredReminderDetails()) {
     // Demo mode — skip processing
     if (!file) {
       setRx(MOCK_RX);
@@ -1800,20 +2047,40 @@ export default function App() {
 
       } else if (!PREVIEW) {
         /* ── Production mode: upload to S3, call backend Lambda ── */
-        const urlRes = await fetch(`${API_BASE}/upload-url`, { method: 'POST' });
+        const uploadContext = {
+          userId: reminderDetails.userId,
+          userTimezone: reminderDetails.userTimezone,
+          notificationMethod: reminderDetails.notificationMethod,
+          contactInfo: reminderDetails.contactInfo,
+        };
+
+        const urlRes = await fetch(`${API_BASE}/upload-url`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            userId: uploadContext.userId,
+            contentType: file.type || 'image/jpeg',
+          }),
+        });
+        if (!urlRes.ok) throw new Error((await urlRes.json()).error || 'Could not create upload URL');
         const { uploadUrl, imageKey } = await urlRes.json();
 
         await fetch(uploadUrl, {
           method: 'PUT', body: file,
-          headers: { 'Content-Type': file.type },
+          headers: { 'Content-Type': file.type || 'image/jpeg' },
         });
 
         const procRes = await fetch(`${API_BASE}/process`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ imageKey }),
+          body: JSON.stringify({
+            imageKey,
+            ...uploadContext,
+          }),
         });
-        parsed = await procRes.json();
+        const processPayload = await procRes.json();
+        if (!procRes.ok) throw new Error(processPayload.error || 'Could not process prescription');
+        parsed = normalizePrescriptionResponse(processPayload);
 
       } else {
         // No key and no backend — fall back to mock

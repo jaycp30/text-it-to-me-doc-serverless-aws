@@ -59,13 +59,33 @@ EventBridge cron (hourly)        → DailySummary Lambda → NotifyUser ──�
 1. The user opens the Amplify-hosted site and either tries **demo mode** (a built-in sample prescription) or uploads a photo of a real prescription.
 2. For a real upload, the frontend calls `POST /upload-url` and receives a short-lived presigned S3 URL plus an `imageKey`.
 3. The browser `PUT`s the image bytes directly to S3 using that URL, so the image never passes through Lambda or API Gateway payload limits.
-4. The frontend calls `POST /process` with the `imageKey` (and, once auth exists, the user's `userId`, timezone, notification method, and contact info).
+4. The frontend calls `POST /process` with the `imageKey`, a local browser profile ID, timezone, notification method, and contact info.
 5. `ProcessPrescription` fetches the image from S3 and sends it to Amazon Bedrock, which returns the medications and dose times as structured JSON.
 6. The Lambda stores the prescription and schedule in DynamoDB, then creates one EventBridge Scheduler rule per future dose (each fires once and auto-deletes).
 7. At each dose time, the Scheduler invokes `NotifyUser`, which sends an SMS (SNS) or email (SES) reminder for that dose — this is **Option A**, exact per-dose reminders.
 8. Independently, an hourly EventBridge cron invokes `DailySummary`, which scans active schedules and, when it is morning in the user's timezone, calls `NotifyUser` with a "today's medications" summary — this is **Option B**.
 9. `GET /schedules` returns the user's active schedules so the frontend can render the current timetable.
 10. `POST /chat` answers medication questions about the current prescription, with guardrails that refuse dose changes, diagnoses, and off-topic questions.
+
+### Where Uploaded Prescriptions Are Stored
+
+Prescription images are stored in the private S3 bucket created by the SAM stack:
+
+```text
+rx-reader-images-441342223857
+```
+
+The browser does not upload the image through Lambda. Instead, `GetUploadUrl` creates a short-lived presigned S3 `PUT` URL, and the browser uploads the image bytes directly to S3:
+
+```text
+Browser
+    → POST /upload-url
+    → GetUploadUrl Lambda
+    → presigned S3 PUT URL
+    → Browser uploads image directly to S3
+```
+
+After upload, `ProcessPrescription` reads the image from S3 and sends it to Bedrock Claude for extraction. The bucket blocks public access, so prescription images are not publicly browseable. A lifecycle rule moves images older than one year to Glacier storage for cheaper long-term retention.
 
 ### AI Model Roles
 
@@ -357,13 +377,25 @@ During `sam deploy --guided`, a value prompt was answered with `y` instead of En
 
 ## Known Limitations
 
-The backend deploys and each Lambda works when called directly, but the full app→backend happy path is not wired yet because there is no auth or onboarding:
+The hosted app can now collect reminder details and send the full `/process` body:
 
-- **No Cognito auth.** `userId` is mocked in the frontend. `GetUploadUrl`, `ProcessPrescription`, and `GetSchedules` all require a real `userId`. The planned fix is Amplify Auth (Cognito) plus a JWT authorizer on the API, passing the Cognito `sub` as `userId`.
-- **No onboarding for contact info.** `ProcessPrescription` needs `contactInfo`, `notificationMethod`, and `userTimezone`; no UI collects them yet.
-- **Minimal `/process` body.** The frontend currently sends only `{ imageKey }`; the Lambda needs `{ imageKey, userId, userTimezone, notificationMethod, contactInfo }`.
+```json
+{
+  "imageKey": "...",
+  "userId": "local-...",
+  "userTimezone": "Europe/London",
+  "notificationMethod": "email",
+  "contactInfo": "user@example.com"
+}
+```
 
-Until then, use **demo mode** in the app and the `curl` smoke test for the backend. None of this blocks deployment — it is the next milestone after the infrastructure is live.
+Current limitations:
+
+- **Local browser profile only.** `userId` is generated in the browser and stored in localStorage. This is fine for the learning build, but it is not a production identity system.
+- **SMS sandbox.** SNS SMS still delivers only to verified sandbox destination numbers until sandbox restrictions are removed.
+- **Email reminders require real recipient details.** SES is production-enabled, but the user must enter a valid email address in the reminder details form.
+
+Use **demo mode** for a no-side-effects walkthrough, and use a real upload only when you are ready to test S3 upload, Bedrock extraction, DynamoDB writes, and reminder scheduling.
 
 ## Teardown
 
