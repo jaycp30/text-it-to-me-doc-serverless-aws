@@ -1,0 +1,9 @@
+{
+  "name": "rx-notify-user",
+  "version": "1.0.0",
+  "main": "index.js",
+  "dependencies": {
+    "@aws-sdk/client-sns": "^3.700.0",
+    "@aws-sdk/client-ses": "^3.700.0"
+  }
+}

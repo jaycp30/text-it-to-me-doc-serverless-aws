@@ -1,0 +1,341 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  RxReader — Serverless prescription reader and medication scheduler.
+  Bedrock Claude reads handwritten prescriptions, creates dose schedules,
+  and sends SMS/email reminders via EventBridge Scheduler + SNS/SES.
+
+# ─── Globals ────────────────────────────────────────────────────────────────
+Globals:
+  Function:
+    Runtime: nodejs24.x
+    Timeout: 120
+    MemorySize: 512
+    Architectures: [arm64]  # cheaper + faster than x86 for Node
+    Environment:
+      Variables:
+        PRESCRIPTIONS_TABLE: !Ref PrescriptionsTable
+        SCHEDULES_TABLE:      !Ref SchedulesTable
+        IMAGES_BUCKET:        !Ref ImagesBucket
+        BEDROCK_MODEL_ID:     !Ref BedrockModelId
+        SCHEDULER_GROUP:      rx-medication-reminders
+        SNS_TOPIC_ARN:        !Ref NotificationTopic
+        # NOTIFIER_FUNCTION_ARN and SCHEDULER_ROLE_ARN are set per-function
+        # (not here) to avoid a circular dependency on NotifyUserFunction.
+
+# ─── Parameters ─────────────────────────────────────────────────────────────
+Parameters:
+  BedrockModelId:
+    Type: String
+    # Tokyo (ap-northeast-1) uses geo-scoped inference profiles, NOT the us. prefix.
+    # jp.* keeps inference within Japan (best data residency for medical images);
+    # apac.* spreads across APAC; global.* may route anywhere. Vision-capable model
+    # required — processPrescription sends the prescription image to this model.
+    Default: "jp.anthropic.claude-sonnet-4-6"
+    Description: Bedrock model ID — must be a vision-capable profile available in your region
+
+  SesFromEmail:
+    Type: String
+    Description: Verified SES sender email address (e.g. noreply@yourdomain.com)
+    Default: "noreply@jaycloud.net"
+
+# ─── Resources ──────────────────────────────────────────────────────────────
+Resources:
+
+  # ── S3: prescription image storage ───────────────────────────────────────
+  ImagesBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "rx-reader-images-${AWS::AccountId}"
+      # Block all public access — images are sensitive medical data
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      CorsConfiguration:
+        CorsRules:
+          - AllowedHeaders: ["*"]
+            AllowedMethods: [GET, PUT]
+            # Tighten this to your Amplify URL after first deploy
+            AllowedOrigins: ["*"]
+            MaxAge: 3600
+      LifecycleConfiguration:
+        Rules:
+          # Prescriptions older than 1 year move to cheap storage
+          - Id: ArchiveOldPrescriptions
+            Status: Enabled
+            Transitions:
+              - TransitionInDays: 365
+                StorageClass: GLACIER
+
+  # ── DynamoDB: prescriptions ───────────────────────────────────────────────
+  PrescriptionsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: rx-prescriptions
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: userId
+          AttributeType: S
+        - AttributeName: prescriptionId
+          AttributeType: S
+      KeySchema:
+        - AttributeName: userId
+          KeyType: HASH
+        - AttributeName: prescriptionId
+          KeyType: RANGE
+      TimeToLiveSpecification:
+        AttributeName: expiresAt
+        Enabled: true  # auto-delete old records
+
+  # ── DynamoDB: schedules ───────────────────────────────────────────────────
+  SchedulesTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: rx-schedules
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: userId
+          AttributeType: S
+        - AttributeName: scheduleId
+          AttributeType: S
+      KeySchema:
+        - AttributeName: userId
+          KeyType: HASH
+        - AttributeName: scheduleId
+          KeyType: RANGE
+      TimeToLiveSpecification:
+        AttributeName: expiresAt
+        Enabled: true
+
+  # ── SNS: SMS notifications ────────────────────────────────────────────────
+  NotificationTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: rx-notifications
+
+  # ── EventBridge Scheduler group ───────────────────────────────────────────
+  # All per-dose schedules live in this group — easy to manage/delete
+  SchedulerGroup:
+    Type: AWS::Scheduler::ScheduleGroup
+    Properties:
+      Name: rx-medication-reminders
+
+  # ── IAM: EventBridge Scheduler → Lambda ───────────────────────────────────
+  SchedulerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "rx-scheduler-role-${AWS::Region}"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: scheduler.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: InvokeNotifyLambda
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: lambda:InvokeFunction
+                Resource: !GetAtt NotifyUserFunction.Arn
+
+  # ── API Gateway ───────────────────────────────────────────────────────────
+  RxApi:
+    Type: AWS::Serverless::HttpApi
+    Properties:
+      StageName: v1
+      CorsConfiguration:
+        AllowOrigins:
+          - "*"  # tighten to your Amplify URL after first deploy
+        AllowMethods:
+          - GET
+          - POST
+          - DELETE
+          - OPTIONS
+        AllowHeaders:
+          - Authorization
+          - Content-Type
+        MaxAge: 600
+
+  # ── Lambda: get presigned S3 upload URL ──────────────────────────────────
+  # Frontend calls this first, uploads image directly to S3 (no Lambda proxy)
+  GetUploadUrlFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: rx-get-upload-url
+      Handler: index.handler
+      CodeUri: backend/functions/getUploadUrl/
+      Policies:
+        - S3WritePolicy:
+            BucketName: !Ref ImagesBucket
+      Events:
+        GetUrl:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref RxApi
+            Path: /upload-url
+            Method: POST
+
+  # ── Lambda: process prescription via Bedrock ──────────────────────────────
+  ProcessPrescriptionFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: rx-process-prescription
+      Handler: index.handler
+      CodeUri: backend/functions/processPrescription/
+      Timeout: 120  # Bedrock can take 30-60s for complex prescriptions
+      Environment:
+        Variables:
+          NOTIFIER_FUNCTION_ARN: !GetAtt NotifyUserFunction.Arn
+          SCHEDULER_ROLE_ARN:    !GetAtt SchedulerRole.Arn
+      Policies:
+        - S3ReadPolicy:
+            BucketName: !Ref ImagesBucket
+        - DynamoDBWritePolicy:
+            TableName: !Ref PrescriptionsTable
+        - DynamoDBWritePolicy:
+            TableName: !Ref SchedulesTable
+        - Statement:
+            - Effect: Allow
+              Action:
+                - bedrock:InvokeModel
+                - bedrock:InvokeModelWithResponseStream
+              Resource: "*"
+        - Statement:
+            - Effect: Allow
+              Action:
+                - scheduler:CreateSchedule
+                - scheduler:DeleteSchedule
+                - scheduler:GetSchedule
+                - iam:PassRole
+              Resource: "*"
+      Events:
+        Process:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref RxApi
+            Path: /process
+            Method: POST
+
+  # ── Lambda: send notification (SMS or email) ──────────────────────────────
+  # Invoked by EventBridge Scheduler (Option A — per-dose)
+  NotifyUserFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: rx-notify-user
+      Handler: index.handler
+      CodeUri: backend/functions/notifyUser/
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref SchedulesTable
+        - Statement:
+            - Effect: Allow
+              Action:
+                - sns:Publish
+              Resource: "*"  # needed for direct SMS (no topic)
+        - Statement:
+            - Effect: Allow
+              Action:
+                - ses:SendEmail
+                - ses:SendRawEmail
+              Resource: "*"
+      Environment:
+        Variables:
+          SES_FROM_EMAIL: !Ref SesFromEmail
+
+  # ── Lambda: daily morning summary ─────────────────────────────────────────
+  # Option B — scans all active schedules, sends "today's meds" summary
+  # Runs every hour so we can handle multiple timezones cleanly
+  DailySummaryFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: rx-daily-summary
+      Handler: index.handler
+      CodeUri: backend/functions/dailySummary/
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref SchedulesTable
+        - LambdaInvokePolicy:
+            FunctionName: !Ref NotifyUserFunction
+        - Statement:
+            - Effect: Allow
+              Action:
+                - sns:Publish
+              Resource: "*"
+        - Statement:
+            - Effect: Allow
+              Action:
+                - ses:SendEmail
+                - ses:SendRawEmail
+              Resource: "*"
+      Environment:
+        Variables:
+          SES_FROM_EMAIL: !Ref SesFromEmail
+          NOTIFIER_FUNCTION_ARN: !GetAtt NotifyUserFunction.Arn
+      Events:
+        # Runs every hour — Lambda checks if it's 8am in the user's timezone
+        HourlyCron:
+          Type: Schedule
+          Properties:
+            Schedule: "rate(1 hour)"
+            Enabled: true
+
+  # ── Lambda: get user's active schedules ───────────────────────────────────
+  GetSchedulesFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: rx-get-schedules
+      Handler: index.handler
+      CodeUri: backend/functions/getSchedules/
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref SchedulesTable
+      Events:
+        Get:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref RxApi
+            Path: /schedules
+            Method: GET
+
+  # ── Lambda: AI chat about the prescription ────────────────────────────────
+  ChatFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: rx-chat
+      Handler: index.handler
+      CodeUri: backend/functions/chat/
+      Timeout: 60
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action:
+                - bedrock:InvokeModel
+                - bedrock:InvokeModelWithResponseStream
+              Resource: "*"
+      Events:
+        Chat:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref RxApi
+            Path: /chat
+            Method: POST
+
+# ─── Outputs ────────────────────────────────────────────────────────────────
+Outputs:
+  ApiUrl:
+    Description: API Gateway endpoint — put this in your Amplify environment variables
+    Value: !Sub "https://${RxApi}.execute-api.${AWS::Region}.amazonaws.com/v1"
+
+  ImagesBucketName:
+    Value: !Ref ImagesBucket
+
+  NotificationTopicArn:
+    Value: !Ref NotificationTopic
+
+  SchedulerGroupName:
+    Value: !Ref SchedulerGroup
