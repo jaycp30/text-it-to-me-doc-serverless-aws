@@ -76,6 +76,35 @@ The application uses Anthropic's **Claude Sonnet 4.6**, accessed through Amazon 
 
 A single SAM parameter, `BedrockModelId`, sets the model for both functions, so the model must be **vision-capable**. The `jp.` profile keeps inference within Japan, which is preferable to the `global.` profile for medical images.
 
+### Bedrock Access: IAM, Not API Keys
+
+The frontend does **not** call Claude or Bedrock directly. The browser calls API Gateway, API Gateway invokes Lambda, and Lambda calls Amazon Bedrock using its AWS execution role:
+
+```text
+Amplify React app
+    → API Gateway
+    → Lambda
+    → Amazon Bedrock
+    → Claude model
+```
+
+This means there is no `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, or `VITE_ANTHROPIC_KEY` required in production. Bedrock access is controlled by AWS IAM instead of an external API key. The Lambda execution role is granted:
+
+```yaml
+Action:
+  - bedrock:InvokeModel
+  - bedrock:InvokeModelWithResponseStream
+```
+
+So the security question is: "Does this Lambda role have permission to invoke this Bedrock model?" The model itself is selected by `BEDROCK_MODEL_ID`, which comes from the SAM parameter `BedrockModelId`.
+
+In short:
+
+```text
+Direct Anthropic API  = API key
+Claude through Bedrock = AWS IAM role permission
+```
+
 ## AWS Services In This Project
 
 ### What Is AWS SAM?
