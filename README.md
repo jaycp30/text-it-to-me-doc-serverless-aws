@@ -1,4 +1,4 @@
-# RxReader — Prescription to Schedule, Serverless
+# Doctor's Prescription Reader — Prescription to Schedule, Serverless
 
 Reads handwritten doctor prescriptions via Bedrock Claude.
 Creates a medication timetable. Sends dose reminders via SMS or email.
