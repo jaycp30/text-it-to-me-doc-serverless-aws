@@ -27,8 +27,6 @@ const ALLOWED_CONTENT_TYPES = [
   "image/jpeg",
   "image/jpg",
   "image/png",
-  "image/heic",
-  "image/heif",
   "image/webp",
 ];
 
@@ -56,13 +54,15 @@ module.exports.handler = async (event) => {
       return { statusCode: 400, headers, body: JSON.stringify({ error: "userId required" }) };
     }
 
-    const fileType = contentType || "image/jpeg";
+    const fileType = String(contentType || "image/jpeg").toLowerCase() === "image/jpg"
+      ? "image/jpeg"
+      : String(contentType || "image/jpeg").toLowerCase();
 
     if (!ALLOWED_CONTENT_TYPES.includes(fileType)) {
       return {
         statusCode: 400,
         headers,
-        body: JSON.stringify({ error: `Content type ${fileType} not allowed. Use JPEG, PNG, or HEIC.` }),
+        body: JSON.stringify({ error: `Content type ${fileType} not allowed. Use JPEG, PNG, or WebP.` }),
       };
     }
 

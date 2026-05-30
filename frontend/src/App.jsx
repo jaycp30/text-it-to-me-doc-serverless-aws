@@ -406,6 +406,17 @@ function fileToBase64(file) {
   });
 }
 
+function getFileContentType(file) {
+  if (file.type) return file.type === 'image/jpg' ? 'image/jpeg' : file.type;
+
+  const ext = file.name.split('.').pop()?.toLowerCase();
+  if (ext === 'png') return 'image/png';
+  if (ext === 'jpg' || ext === 'jpeg') return 'image/jpeg';
+  if (ext === 'webp') return 'image/webp';
+  if (ext === 'heic' || ext === 'heif') return 'image/heic';
+  return 'image/jpeg';
+}
+
 const COLOR_VAR  = { sage: 'var(--sage)', lav: 'var(--lav)',  peach: 'var(--peach)' };
 const COLOR_LT   = { sage: 'var(--sage-lt)', lav: 'var(--lav-lt)', peach: 'var(--peach-lt)' };
 const COLOR_DARK = { sage: 'var(--sage-dk)', lav: 'var(--lav-dk)', peach: 'var(--peach-dk)' };
@@ -916,7 +927,7 @@ function HomeScreen({ onUpload }) {
               fontFamily: 'var(--font-head)', fontWeight: 600, fontSize: 15,
               color: 'var(--text)', marginBottom: 4,
             }}>Tap to upload prescription pages</p>
-            <p style={{ fontSize: 12, color: 'var(--text3)' }}>or drag &amp; drop up to {MAX_UPLOAD_IMAGES} images</p>
+            <p style={{ fontSize: 12, color: 'var(--text3)' }}>or drag &amp; drop up to {MAX_UPLOAD_IMAGES} JPEG, PNG, or WebP images</p>
           </div>
         )}
       </div>
@@ -1227,8 +1238,8 @@ function ProcessingErrorScreen({ error, onTryAgain }) {
         {error && (
           <p style={{
             fontFamily: 'var(--font-mono)', fontSize: 12, lineHeight: 1.55,
-            color: 'var(--danger)', background: 'rgba(255,255,255,0.44)',
-            border: '1px solid rgba(232,92,92,0.18)',
+            color: '#fff', background: 'rgba(124,34,48,0.72)',
+            border: '1px solid rgba(255,255,255,0.18)',
             borderRadius: 'var(--r-md)', padding: '10px 12px', marginBottom: 16,
             wordBreak: 'break-word',
           }}>
@@ -2156,7 +2167,7 @@ export default function App() {
           type: 'image',
           source: {
             type: 'base64',
-            media_type: file.type || 'image/jpeg',
+            media_type: getFileContentType(file),
             data: await fileToBase64(file),
           },
         })));
@@ -2206,7 +2217,7 @@ export default function App() {
               userId: uploadContext.userId,
               uploadId,
               pageNumber: index + 1,
-              contentType: file.type || 'image/jpeg',
+              contentType: getFileContentType(file),
             }),
           });
           const urlPayload = await urlRes.json();
@@ -2215,7 +2226,7 @@ export default function App() {
 
           const putRes = await fetch(uploadUrl, {
             method: 'PUT', body: file,
-            headers: { 'Content-Type': file.type || 'image/jpeg' },
+            headers: { 'Content-Type': getFileContentType(file) },
           });
           if (!putRes.ok) throw new Error(`Could not upload page ${index + 1}`);
 

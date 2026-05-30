@@ -22,6 +22,7 @@ const { DateTime } = require("luxon");
 const { randomUUID } = require("crypto");
 
 const MAX_IMAGES = 5;
+const BEDROCK_IMAGE_TYPES = new Set(["image/jpeg", "image/png", "image/webp"]);
 
 // ─── AWS clients ─────────────────────────────────────────────────────────────
 const bedrock   = new BedrockRuntimeClient({ region: process.env.AWS_REGION });
@@ -115,13 +116,49 @@ async function getImageFromS3(imageKey) {
     chunks.push(chunk);
   }
 
-  // Detect content type — S3 stores what the presigned upload sent
-  const contentType = response.ContentType || "image/jpeg";
+  const buffer = Buffer.concat(chunks);
+  const contentType = detectImageContentType(buffer, response.ContentType);
+
+  if (!BEDROCK_IMAGE_TYPES.has(contentType)) {
+    throw new Error(`Unsupported image type ${contentType}. Please upload JPEG, PNG, or WebP images.`);
+  }
 
   return {
-    base64: Buffer.concat(chunks).toString("base64"),
+    base64: buffer.toString("base64"),
     contentType,
   };
+}
+
+function normalizeContentType(contentType) {
+  const type = String(contentType || "").toLowerCase().split(";")[0].trim();
+  return type === "image/jpg" ? "image/jpeg" : type;
+}
+
+function detectImageContentType(buffer, fallback) {
+  if (buffer.length >= 4 && buffer[0] === 0x89 && buffer[1] === 0x50 && buffer[2] === 0x4e && buffer[3] === 0x47) {
+    return "image/png";
+  }
+
+  if (buffer.length >= 3 && buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff) {
+    return "image/jpeg";
+  }
+
+  if (
+    buffer.length >= 12 &&
+    buffer.toString("ascii", 0, 4) === "RIFF" &&
+    buffer.toString("ascii", 8, 12) === "WEBP"
+  ) {
+    return "image/webp";
+  }
+
+  if (buffer.length >= 12 && buffer.toString("ascii", 4, 8) === "ftyp") {
+    const brand = buffer.toString("ascii", 8, 12).toLowerCase();
+    if (brand.startsWith("hei") || brand.startsWith("mif")) {
+      return "image/heic";
+    }
+  }
+
+  return normalizeContentType(fallback) || "image/jpeg";
 }
 
 /**
