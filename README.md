@@ -19,6 +19,7 @@ text-it-to-me-doc-app/
 │       ├── getUploadUrl/           # Returns a presigned S3 PUT URL
 │       ├── processPrescription/    # Bedrock vision → schedule → DynamoDB + Scheduler
 │       ├── notifyUser/             # Sends one reminder via SNS (SMS) or SES (email)
+│       ├── cancelReminders/        # Cancels all upcoming reminders for a user (opt-out)
 │       ├── dailySummary/           # Hourly cron → today's-meds summary
 │       ├── getSchedules/           # Returns the user's active schedules
 │       └── chat/                   # Bedrock medication Q&A with guardrails
@@ -37,14 +38,16 @@ Amplify (Vite/React frontend)
     ▼
 API Gateway HTTP API  (RxApi, stage /v1)
     │
-    ├── POST /upload-url   → GetUploadUrl Lambda        → S3 presigned PUT URL
-    ├── POST /process      → ProcessPrescription Lambda
-    │                            → S3            (fetch uploaded image)
-    │                            → Bedrock       (read prescription image)
-    │                            → DynamoDB      (save prescription + schedule)
-    │                            → Scheduler     (one rule per future dose) ── Option A
-    ├── GET  /schedules    → GetSchedules Lambda         → DynamoDB
-    └── POST /chat         → Chat Lambda                 → Bedrock (Q&A)
+    ├── POST   /upload-url         → GetUploadUrl Lambda       → S3 presigned PUT URL
+    ├── POST   /process            → ProcessPrescription Lambda
+    │                                    → S3            (fetch uploaded image)
+    │                                    → Bedrock       (read prescription image)
+    │                                    → DynamoDB      (save prescription + schedule)
+    │                                    → Scheduler     (one rule per future dose) ── Option A
+    ├── GET    /schedules          → GetSchedules Lambda        → DynamoDB
+    ├── DELETE /reminders/{userId} → CancelReminders Lambda     → Scheduler (delete rules) + DynamoDB (mark inactive)
+    ├── POST   /notify-test        → NotifyUser Lambda          → SNS SMS or SES email (immediate smoke test)
+    └── POST   /chat               → Chat Lambda                → Bedrock (Q&A)
 
 EventBridge Scheduler (per dose) → NotifyUser Lambda → SNS SMS  or  SES email
 EventBridge cron (hourly)        → DailySummary Lambda → NotifyUser ──────── Option B
@@ -66,6 +69,7 @@ EventBridge cron (hourly)        → DailySummary Lambda → NotifyUser ──�
 8. Independently, an hourly EventBridge cron invokes `DailySummary`, which scans active schedules and, when it is morning in the user's timezone, calls `NotifyUser` with a "today's medications" summary — this is **Option B**.
 9. `GET /schedules` returns the user's active schedules so the frontend can render the current timetable.
 10. `POST /chat` answers medication questions about the current prescription, with guardrails that refuse dose changes, diagnoses, and off-topic questions.
+11. `DELETE /reminders/{userId}` cancels all upcoming reminders. The `CancelReminders` Lambda queries DynamoDB for all active schedule records, deletes each linked EventBridge Scheduler rule by name, and marks every record inactive so `DailySummary` skips the user. Rules that have already fired are ignored. The frontend exposes this as a **Stop reminders** button in the reminder details panel.
 
 ### Where Uploaded Prescriptions Are Stored
 
@@ -93,7 +97,21 @@ Multi-page uploads are grouped under one S3 prefix:
 <userId>/prescriptions/<uploadId>/page-3.jpg
 ```
 
-After upload, `ProcessPrescription` reads the image(s) from S3 and sends up to 5 pages to Bedrock Claude in one request for extraction. The bucket blocks public access, so prescription images are not publicly browseable. A lifecycle rule moves images older than one year to Glacier storage for cheaper long-term retention.
+After upload, `ProcessPrescription` reads the image(s) from S3 and sends up to 5 pages to Bedrock Claude in one request for extraction.
+
+### S3 Bucket Security
+
+Prescription images are sensitive medical data. The bucket is locked down at multiple layers:
+
+| Control | Setting | Effect |
+|---|---|---|
+| Block Public Access | All four flags enabled | No object can ever be made public, even if a policy or ACL tries to allow it |
+| CORS | `AllowedOrigins: [Amplify URL only]` | Only the Amplify-hosted frontend can initiate presigned PUT uploads from a browser |
+| Presigned URLs | Short-lived PUT-only URLs issued by `GetUploadUrl` | The browser uploads directly to S3 without any credentials; the URL expires after one use |
+| Lambda access | `S3ReadPolicy` on `ProcessPrescription`, `S3WritePolicy` on `GetUploadUrl` | No other Lambda or IAM principal has access to the bucket |
+| Lifecycle rule | Transitions to Glacier after 365 days | Old images move to cold storage automatically; no permanent hot-storage copy |
+
+There is no public S3 URL for any prescription image. The only way to read an image is through the `ProcessPrescription` Lambda, which reads it via an AWS SDK call using its execution role — not a public URL. A lifecycle rule moves images older than one year to Glacier storage for cheaper long-term retention.
 
 ### AI Model Roles
 
@@ -326,13 +344,15 @@ Supported timezone presets in the UI include Manila, London, Tokyo, Edmonton, Ku
 The HTTP API (`RxApi`) is created by SAM with stage `v1`. Routes:
 
 ```text
-POST /upload-url   -> GetUploadUrl
-POST /process      -> ProcessPrescription
-GET  /schedules    -> GetSchedules
-POST /chat         -> Chat
+POST   /upload-url         -> GetUploadUrl
+POST   /process            -> ProcessPrescription
+GET    /schedules          -> GetSchedules
+DELETE /reminders/{userId} -> CancelReminders
+POST   /notify-test        -> NotifyUser (immediate smoke test)
+POST   /chat               -> Chat
 ```
 
-`NotifyUser` and `DailySummary` have no HTTP route — they are invoked by EventBridge Scheduler and the hourly cron, respectively.
+`DailySummary` has no HTTP route — it is triggered by an hourly EventBridge cron. `NotifyUser` is invoked by EventBridge Scheduler for each dose and via `/notify-test` for smoke tests.
 
 Smoke-test the deployed API without the app:
 
@@ -416,8 +436,9 @@ Current limitations:
 
 - **Local browser profile only.** `userId` is generated in the browser and stored in localStorage. This is fine for the learning build, but it is not a production identity system.
 - **Five-image upload cap.** The UI and backend intentionally limit one processing run to 5 prescription pages/screenshots to control cost and processing time.
-- **SMS sandbox.** SNS SMS still delivers only to verified sandbox destination numbers until sandbox restrictions are removed.
+- **SMS sandbox.** SNS SMS still delivers only to verified sandbox destination numbers until AWS approves a production access request.
 - **Email reminders require real recipient details.** SES is production-enabled, but the user must enter a valid email address in the reminder details form.
+- **Stop reminders cancels future doses only.** Doses that have already fired are gone. If a prescription is re-uploaded after stopping, new Scheduler rules are created from that point forward.
 
 Use **demo mode** for a no-side-effects walkthrough, and use a real upload only when you are ready to test S3 upload, Bedrock extraction, DynamoDB writes, and reminder scheduling.
 

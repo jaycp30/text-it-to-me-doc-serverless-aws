@@ -291,6 +291,33 @@ Resources:
             Schedule: "rate(1 hour)"
             Enabled: true
 
+  # ── Lambda: cancel all upcoming reminders for a user ─────────────────────
+  # DELETE /reminders/{userId} — deletes EventBridge rules + marks DynamoDB inactive
+  CancelRemindersFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: rx-cancel-reminders
+      Handler: index.handler
+      CodeUri: backend/functions/cancelReminders/
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref SchedulesTable
+        - DynamoDBWritePolicy:
+            TableName: !Ref SchedulesTable
+        - Statement:
+            - Effect: Allow
+              Action:
+                - scheduler:DeleteSchedule
+                - scheduler:ListSchedules
+              Resource: "*"
+      Events:
+        Cancel:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref RxApi
+            Path: /reminders/{userId}
+            Method: DELETE
+
   # ── Lambda: get user's active schedules ───────────────────────────────────
   GetSchedulesFunction:
     Type: AWS::Serverless::Function

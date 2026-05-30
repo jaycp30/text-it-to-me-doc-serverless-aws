@@ -883,6 +883,8 @@ function HomeScreen({ onUpload }) {
   const [loading, setLoading]   = useState(false);
   const [testLoading, setTestLoading] = useState(false);
   const [testStatus, setTestStatus] = useState('');
+  const [cancelLoading, setCancelLoading] = useState(false);
+  const [cancelStatus, setCancelStatus] = useState('');
   const [reminderDetails, setReminderDetails] = useState(getStoredReminderDetails);
   const [formError, setFormError] = useState('');
 
@@ -980,6 +982,28 @@ function HomeScreen({ onUpload }) {
       setFormError(err.message || 'Could not send test notification.');
     } finally {
       setTestLoading(false);
+    }
+  }
+
+  async function handleCancelReminders() {
+    if (!API_BASE) {
+      setFormError('Cancel reminders needs the deployed backend API.');
+      return;
+    }
+    setCancelLoading(true);
+    setCancelStatus('');
+    setFormError('');
+    try {
+      const res = await fetch(`${API_BASE}/reminders/${encodeURIComponent(reminderDetails.userId)}`, {
+        method: 'DELETE',
+      });
+      const payload = await res.json();
+      if (!res.ok) throw new Error(errorFromPayload(payload, 'Could not cancel reminders'));
+      setCancelStatus(payload.message || 'Reminders cancelled.');
+    } catch (err) {
+      setFormError(err.message || 'Could not cancel reminders.');
+    } finally {
+      setCancelLoading(false);
     }
   }
 
@@ -1214,6 +1238,34 @@ function HomeScreen({ onUpload }) {
               lineHeight: 1.45, fontWeight: 600,
             }}>
               {testStatus}
+            </p>
+          )}
+
+          <button
+            type="button"
+            onClick={handleCancelReminders}
+            disabled={cancelLoading}
+            style={{
+              width: '100%', marginTop: 10, padding: '12px 13px',
+              borderRadius: 'var(--r-full)',
+              background: cancelLoading ? 'var(--bg3)' : 'var(--peach-lt)',
+              color: cancelLoading ? 'var(--text3)' : 'var(--peach)',
+              fontFamily: 'var(--font-head)', fontWeight: 600, fontSize: 13,
+              display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8,
+              border: '1px solid rgba(196,142,142,0.25)',
+            }}
+          >
+            {cancelLoading
+              ? <><Spinner size={15} color="var(--peach)" /> Cancelling…</>
+              : <><Icon name="x-circle" size={16} strokeWidth={2} /> Stop reminders</>}
+          </button>
+
+          {cancelStatus && (
+            <p style={{
+              color: 'var(--peach)', fontSize: 12, marginTop: 10,
+              lineHeight: 1.45, fontWeight: 600,
+            }}>
+              {cancelStatus}
             </p>
           )}
 
