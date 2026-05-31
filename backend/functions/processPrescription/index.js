@@ -253,10 +253,16 @@ async function createDoseSchedule({ scheduleId, dose, userId, userTimezone, noti
     return null;
   }
 
-  // EventBridge schedule name must match [a-zA-Z0-9-_.] and be unique
-  const safeName = `rx-${scheduleId}-${dose.date}-${dose.time.replace(":", "")}-${dose.medication}`
+  // EventBridge Scheduler "Name" must match [a-zA-Z0-9-_.], be unique within
+  // the group, and be <= 64 characters (NOT 512). Build a short, readable,
+  // collision-proof name: a truncated medication slug + a random 8-char suffix.
+  const medSlug = (dose.medication || "med")
+    .replace(/[^a-zA-Z0-9]/g, "")
+    .substring(0, 18);
+  const unique = randomUUID().slice(0, 8);
+  const safeName = `rx-${dose.date}-${dose.time.replace(":", "")}-${medSlug}-${unique}`
     .replace(/[^a-zA-Z0-9-_]/g, "-")
-    .substring(0, 512);  // max length
+    .substring(0, 64);  // EventBridge Scheduler hard limit
 
   const command = new CreateScheduleCommand({
     Name: safeName,
