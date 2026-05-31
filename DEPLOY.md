@@ -508,6 +508,42 @@ applications:
 
 ---
 
+## Step 6b — Add a custom domain (optional)
+
+Skip this if you're happy with the `*.amplifyapp.com` URL. Do this after Step 6 is complete and the Amplify app is live.
+
+**Prerequisites:** a domain registered in Route 53 in the same AWS account.
+
+1. Amplify Console → your app → **Hosting → Domain management → Add domain**
+2. Type your root domain (e.g. `jaycloud.net`) → Amplify detects it as a Route 53 domain automatically → click **Configure domain**
+3. On the subdomains screen:
+   - Click **Exclude root** on the first row (so your root domain isn't affected)
+   - Set the subdomain prefix on the second row (e.g. `textit2medoc`) → branch = `main`
+   - SSL: keep **Amplify managed certificate**
+4. Click **Add domain**
+
+Amplify works through three stages automatically (no manual DNS edits needed):
+- **SSL creation** — issues an ACM certificate (~5–10 min)
+- **SSL configuration** — adds the validation record to Route 53
+- **Domain activation** — creates the CNAME and flips the domain live (~15–30 min total)
+
+5. Once status shows **Available**, redeploy the backend with the custom domain as `AppUrl`:
+   ```bash
+   sam build && sam deploy --parameter-overrides \
+     "AppUrl=https://textit2medoc.yourdomain.com" \
+     "BedrockModelId=..." \
+     "SesFromEmail=..." \
+     "TurnstileSecretKey=..." \
+     "MagicLinkSecret=..."
+   ```
+   This updates CORS rules and email magic links to use the new URL. The original `*.amplifyapp.com` URL stays active — Amplify serves both simultaneously.
+
+6. Open the custom domain in your browser and confirm the app loads without console errors.
+
+> For full details and context, see the [[Custom Domain Setup|Custom-Domain-Setup]] wiki page.
+
+---
+
 ## Step 7 — Known limitations (the app→backend happy path)
 
 The backend deploys and each Lambda works when called directly, but the **app isn't fully wired to it yet** because there's no auth/onboarding:
