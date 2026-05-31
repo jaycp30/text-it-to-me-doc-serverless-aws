@@ -40,6 +40,12 @@ Parameters:
     Description: Verified SES sender email address (e.g. noreply@yourdomain.com)
     Default: "noreply@jaycloud.net"
 
+  TurnstileSecretKey:
+    Type: String
+    NoEcho: true
+    Description: Cloudflare Turnstile secret key used to protect the public /notify-test endpoint
+    Default: ""
+
 # ─── Resources ──────────────────────────────────────────────────────────────
 Resources:
 
@@ -267,6 +273,7 @@ Resources:
       Environment:
         Variables:
           SES_FROM_EMAIL: !Ref SesFromEmail
+          TURNSTILE_SECRET_KEY: !Ref TurnstileSecretKey
       Events:
         TestNotification:
           Type: HttpApi

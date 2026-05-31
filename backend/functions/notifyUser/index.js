@@ -12,12 +12,15 @@
 
 const { SNSClient, PublishCommand } = require("@aws-sdk/client-sns");
 const { SESClient, SendEmailCommand } = require("@aws-sdk/client-ses");
+const { randomUUID } = require("crypto");
 
 const sns = new SNSClient({});
 const ses = new SESClient({});
 
 const SES_FROM_EMAIL = process.env.SES_FROM_EMAIL || "noreply@rxreader.app";
 const APP_URL        = process.env.APP_URL        || "https://main.d3bj6u7583ielg.amplifyapp.com";
+const TURNSTILE_SECRET_KEY = process.env.TURNSTILE_SECRET_KEY || "";
+const TURNSTILE_VERIFY_URL = "https://challenges.cloudflare.com/turnstile/v0/siteverify";
 
 const RESPONSE_HEADERS = {
   "Content-Type": "application/json",
@@ -40,6 +43,47 @@ function response(statusCode, payload, http = true) {
 function getPayload(event) {
   if (!isHttpEvent(event)) return event;
   return JSON.parse(event.body || "{}");
+}
+
+function getRequestIp(event) {
+  return event?.requestContext?.http?.sourceIp ||
+    event?.headers?.["cf-connecting-ip"] ||
+    event?.headers?.["x-forwarded-for"]?.split(",")[0]?.trim() ||
+    undefined;
+}
+
+async function verifyTurnstileToken(token, remoteip) {
+  if (!TURNSTILE_SECRET_KEY) {
+    console.error("TURNSTILE_SECRET_KEY is not configured");
+    return { success: false, "error-codes": ["missing-secret"] };
+  }
+
+  if (!token || String(token).length > 2048) {
+    return { success: false, "error-codes": ["missing-input-response"] };
+  }
+
+  try {
+    const res = await fetch(TURNSTILE_VERIFY_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        secret: TURNSTILE_SECRET_KEY,
+        response: token,
+        remoteip,
+        idempotency_key: randomUUID(),
+      }),
+    });
+
+    if (!res.ok) {
+      console.error(`Turnstile verification HTTP ${res.status}`);
+      return { success: false, "error-codes": ["siteverify-http-error"] };
+    }
+
+    return await res.json();
+  } catch (error) {
+    console.error("Turnstile verification error:", error);
+    return { success: false, "error-codes": ["siteverify-request-error"] };
+  }
 }
 
 // ─── Message formatters (plain text — used for SMS and email fallback) ────────
@@ -330,10 +374,21 @@ module.exports.handler = async (event) => {
       dose,               // single dose object (Option A)
       doses,              // array of dose objects (Option B daily summary)
       type,               // "dose" | "daily_summary" | "test" | "subscribed"
+      turnstileToken,     // Cloudflare Turnstile token for public test sends
       medications,        // array of medication objects (subscribed confirmation)
       dosesScheduled,     // number of scheduled doses (subscribed confirmation)
       userTimezone,       // IANA timezone string (subscribed confirmation)
     } = payload;
+
+    if (http && type === "test") {
+      const validation = await verifyTurnstileToken(turnstileToken, getRequestIp(event));
+      if (!validation.success) {
+        console.warn("Turnstile verification failed:", validation["error-codes"]);
+        return response(403, {
+          error: "Human verification failed. Please try again.",
+        }, http);
+      }
+    }
 
     if (!contactInfo) {
       console.error("No contactInfo provided — cannot send notification");

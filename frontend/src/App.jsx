@@ -288,9 +288,40 @@ function useIsDesktop(breakpoint = 900) {
 ───────────────────────────────────────────────────────────────────────────── */
 const API_BASE    = import.meta.env.VITE_API_BASE_URL || '';
 const ANTH_KEY    = import.meta.env.VITE_ANTHROPIC_KEY || '';
+const TURNSTILE_SITE_KEY = import.meta.env.VITE_TURNSTILE_SITE_KEY || '';
 const PREVIEW     = !API_BASE;
 const GITHUB_URL  = 'https://github.com/jaycp30/text-it-to-me-doc-serverless-aws';
 const MAX_UPLOAD_IMAGES = 5;
+
+const PROCESSING_STAGES = {
+  preparing: {
+    icon: 'camera',
+    title: 'Preparing your upload',
+    detail: 'Checking the prescription pages and reminder details.',
+  },
+  uploading: {
+    icon: 'arrowUp',
+    title: 'Uploading securely',
+    detail: 'Sending prescription pages directly to encrypted storage.',
+  },
+  reading: {
+    icon: 'scan',
+    title: 'Reading the prescription',
+    detail: 'Claude is extracting medication names, doses, and instructions.',
+  },
+  scheduling: {
+    icon: 'calendar',
+    title: 'Creating reminders',
+    detail: 'Saving your schedule and setting each dose reminder.',
+  },
+  finishing: {
+    icon: 'check',
+    title: 'Finishing setup',
+    detail: 'Almost done. We are preparing your medication timeline.',
+  },
+};
+
+const PROCESSING_STAGE_ORDER = ['preparing', 'uploading', 'reading', 'scheduling', 'finishing'];
 
 const TIMEZONE_OPTIONS = [
   { value: 'Asia/Manila', label: 'Asia/Manila, PH' },
@@ -494,6 +525,29 @@ function saveReminderDetails(details) {
   } catch {
     // Storage is a convenience only; uploading should still work if blocked.
   }
+}
+
+function loadTurnstileScript() {
+  if (typeof window === 'undefined') return Promise.reject(new Error('Turnstile is not available.'));
+  if (window.turnstile) return Promise.resolve(window.turnstile);
+
+  return new Promise((resolve, reject) => {
+    const existing = document.querySelector('script[data-turnstile]');
+    if (existing) {
+      existing.addEventListener('load', () => resolve(window.turnstile), { once: true });
+      existing.addEventListener('error', () => reject(new Error('Could not load human verification.')), { once: true });
+      return;
+    }
+
+    const script = document.createElement('script');
+    script.src = 'https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit';
+    script.async = true;
+    script.defer = true;
+    script.dataset.turnstile = '1';
+    script.onload = () => resolve(window.turnstile);
+    script.onerror = () => reject(new Error('Could not load human verification.'));
+    document.head.appendChild(script);
+  });
 }
 
 function validateReminderDetails(details) {
@@ -877,12 +931,16 @@ function Sidebar({ screen, tab, setTab, onNewRx, onChat }) {
 ───────────────────────────────────────────────────────────────────────────── */
 function HomeScreen({ onUpload }) {
   const fileRef   = useRef();
+  const turnstileRef = useRef(null);
+  const turnstileWidgetRef = useRef(null);
   const [files, setFiles]       = useState([]);
   const [previews, setPreviews] = useState([]);
   const [dragOver, setDragOver] = useState(false);
   const [loading, setLoading]   = useState(false);
   const [testLoading, setTestLoading] = useState(false);
   const [testStatus, setTestStatus] = useState('');
+  const [turnstileToken, setTurnstileToken] = useState('');
+  const [turnstileReady, setTurnstileReady] = useState(!TURNSTILE_SITE_KEY);
   const [cancelLoading, setCancelLoading] = useState(false);
   const [cancelStatus, setCancelStatus] = useState('');
   const [reminderDetails, setReminderDetails] = useState(getStoredReminderDetails);
@@ -899,6 +957,60 @@ function HomeScreen({ onUpload }) {
   useEffect(() => {
     return () => previews.forEach(previewUrl => URL.revokeObjectURL(previewUrl));
   }, [previews]);
+
+  useEffect(() => {
+    if (!TURNSTILE_SITE_KEY || !turnstileRef.current) return undefined;
+
+    let cancelled = false;
+
+    loadTurnstileScript()
+      .then((turnstile) => {
+        if (cancelled || !turnstileRef.current || turnstileWidgetRef.current) return;
+
+        turnstileWidgetRef.current = turnstile.render(turnstileRef.current, {
+          sitekey: TURNSTILE_SITE_KEY,
+          theme: 'auto',
+          size: 'flexible',
+          action: 'notify-test',
+          callback: (token) => {
+            setTurnstileToken(token);
+            setTurnstileReady(true);
+            setFormError('');
+          },
+          'expired-callback': () => {
+            setTurnstileToken('');
+            setTurnstileReady(false);
+          },
+          'error-callback': () => {
+            setTurnstileToken('');
+            setTurnstileReady(false);
+            setFormError('Human verification could not load. Please refresh and try again.');
+          },
+        });
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setTurnstileReady(false);
+          setFormError('Human verification could not load. Please refresh and try again.');
+        }
+      });
+
+    return () => {
+      cancelled = true;
+      if (window.turnstile && turnstileWidgetRef.current) {
+        window.turnstile.remove(turnstileWidgetRef.current);
+        turnstileWidgetRef.current = null;
+      }
+    };
+  }, [files.length]);
+
+  function resetTurnstile() {
+    setTurnstileToken('');
+    if (TURNSTILE_SITE_KEY) setTurnstileReady(false);
+    if (window.turnstile && turnstileWidgetRef.current) {
+      window.turnstile.reset(turnstileWidgetRef.current);
+    }
+  }
 
   function updateReminderDetail(key, value) {
     setReminderDetails(prev => {
@@ -959,6 +1071,14 @@ function HomeScreen({ onUpload }) {
       setFormError('Test notifications need the deployed backend API.');
       return;
     }
+    if (!TURNSTILE_SITE_KEY) {
+      setFormError('Human verification is not configured for this deployment.');
+      return;
+    }
+    if (TURNSTILE_SITE_KEY && !turnstileToken) {
+      setFormError('Complete the human verification before sending a test notification.');
+      return;
+    }
 
     setTestLoading(true);
     setTestStatus('');
@@ -973,13 +1093,16 @@ function HomeScreen({ onUpload }) {
           userId: reminderDetails.userId,
           notificationMethod: reminderDetails.notificationMethod,
           contactInfo: reminderDetails.contactInfo.trim(),
+          turnstileToken,
         }),
       });
       const payload = await res.json();
       if (!res.ok) throw new Error(errorFromPayload(payload, 'Could not send test notification'));
       setTestStatus(`Test ${reminderDetails.notificationMethod === 'sms' ? 'SMS' : 'email'} sent.`);
+      resetTurnstile();
     } catch (err) {
       setFormError(err.message || 'Could not send test notification.');
+      resetTurnstile();
     } finally {
       setTestLoading(false);
     }
@@ -1213,15 +1336,47 @@ function HomeScreen({ onUpload }) {
             </select>
           </label>
 
+          {TURNSTILE_SITE_KEY ? (
+            <div style={{
+              marginTop: 12,
+              padding: '10px 12px',
+              borderRadius: 'var(--r-md)',
+              background: 'var(--bg2)',
+              border: '1px solid var(--glass-line)',
+              overflow: 'hidden',
+            }}>
+              <div ref={turnstileRef} />
+              <p style={{
+                fontSize: 11,
+                color: turnstileReady ? 'var(--sage)' : 'var(--text3)',
+                lineHeight: 1.45,
+                marginTop: 8,
+              }}>
+                {turnstileReady
+                  ? 'Human verification ready for the test notification.'
+                  : 'Human verification is required before sending a test notification.'}
+              </p>
+            </div>
+          ) : API_BASE && (
+            <p style={{
+              fontSize: 12,
+              color: 'var(--danger)',
+              lineHeight: 1.45,
+              marginTop: 10,
+            }}>
+              Test notifications need Cloudflare Turnstile configured for this deployment.
+            </p>
+          )}
+
           <button
             type="button"
             onClick={handleTestNotification}
-            disabled={testLoading}
+            disabled={testLoading || !TURNSTILE_SITE_KEY || !turnstileReady}
             style={{
               width: '100%', marginTop: 12, padding: '12px 13px',
               borderRadius: 'var(--r-full)',
-              background: testLoading ? 'var(--bg3)' : 'var(--lav-lt)',
-              color: testLoading ? 'var(--text3)' : 'var(--lav)',
+              background: (testLoading || !TURNSTILE_SITE_KEY || !turnstileReady) ? 'var(--bg3)' : 'var(--lav-lt)',
+              color: (testLoading || !TURNSTILE_SITE_KEY || !turnstileReady) ? 'var(--text3)' : 'var(--lav)',
               fontFamily: 'var(--font-head)', fontWeight: 600, fontSize: 13,
               display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8,
               border: '1px solid rgba(155,142,196,0.25)',
@@ -1407,19 +1562,19 @@ function HomeScreen({ onUpload }) {
 /* ─────────────────────────────────────────────────────────────────────────────
    PROCESSING SCREEN
 ───────────────────────────────────────────────────────────────────────────── */
-function ProcessingScreen() {
-  const [step, setStep] = useState(0);
-  const steps = [
-    { icon: 'camera',   text: 'Analysing prescription image…' },
-    { icon: 'scan',     text: 'Reading medication names…'      },
-    { icon: 'cpu',      text: 'Understanding dosing schedule…' },
-    { icon: 'calendar', text: 'Building your timeline…'        },
-  ];
+function ProcessingScreen({ stage = 'preparing', startedAt }) {
+  const [elapsed, setElapsed] = useState(0);
+  const displayStage = stage === 'reading' && elapsed >= 12 ? 'scheduling' : stage;
+  const currentIndex = Math.max(0, PROCESSING_STAGE_ORDER.indexOf(displayStage));
 
   useEffect(() => {
-    const id = setInterval(() => setStep(s => Math.min(s + 1, steps.length - 1)), 1900);
+    const started = startedAt || Date.now();
+    setElapsed(Math.max(0, Math.floor((Date.now() - started) / 1000)));
+    const id = setInterval(() => {
+      setElapsed(Math.max(0, Math.floor((Date.now() - started) / 1000)));
+    }, 1000);
     return () => clearInterval(id);
-  }, [steps.length]);
+  }, [startedAt]);
 
   return (
     <div
@@ -1446,38 +1601,48 @@ function ProcessingScreen() {
         color: 'var(--text)', marginBottom: 6, textAlign: 'center',
       }}>Reading your prescription</h2>
       <p style={{ fontSize: 14, color: 'var(--text2)', marginBottom: 32, textAlign: 'center' }}>
-        Usually takes about 10 seconds
+        {elapsed < 15
+          ? `Working for ${elapsed}s. Most prescriptions finish in 15-25 seconds.`
+          : 'This one is taking a little longer. Keep this tab open while we finish safely.'}
       </p>
 
       <div style={{ width: '100%', maxWidth: 340 }}>
-        {steps.map((s, i) => (
+        {PROCESSING_STAGE_ORDER.map((key, i) => {
+          const s = PROCESSING_STAGES[key];
+          return (
           <div
-            key={i}
+            key={key}
             style={{
-              display: 'flex', alignItems: 'center', gap: 12,
+              display: 'flex', alignItems: 'flex-start', gap: 12,
               padding: '11px 15px', borderRadius: 'var(--r-lg)', marginBottom: 8,
-              background: i === step ? 'var(--sage-lt)' : 'transparent',
-              opacity: i > step ? 0.3 : 1,
+              background: i === currentIndex ? 'var(--sage-lt)' : 'transparent',
+              opacity: i > currentIndex ? 0.34 : 1,
               transition: 'all 0.4s ease',
             }}
           >
             <div style={{
-              width: 28, height: 28, borderRadius: '50%', flexShrink: 0,
-              background: i < step ? 'var(--sage)' : i === step ? 'var(--lav)' : 'var(--bg3)',
+              width: 28, height: 28, borderRadius: '50%', flexShrink: 0, marginTop: 2,
+              background: i < currentIndex ? 'var(--sage)' : i === currentIndex ? 'var(--lav)' : 'var(--bg3)',
               display: 'flex', alignItems: 'center', justifyContent: 'center',
-              color: i <= step ? '#fff' : 'var(--text3)',
+              color: i <= currentIndex ? '#fff' : 'var(--text3)',
               transition: 'background 0.3s ease',
             }}>
-              <Icon name={i < step ? 'check' : s.icon} size={15} strokeWidth={2} />
+              <Icon name={i < currentIndex ? 'check' : s.icon} size={15} strokeWidth={2} />
             </div>
-            <span style={{
-              fontSize: 14, color: 'var(--text)',
-              fontWeight: i === step ? 600 : 400,
-              flex: 1,
-            }}>{s.text}</span>
-            {i === step && <Spinner size={15} color="var(--lav)" />}
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <p style={{
+                fontSize: 14, color: 'var(--text)',
+                fontWeight: i === currentIndex ? 700 : 600,
+                marginBottom: 2,
+              }}>{s.title}</p>
+              <p style={{ fontSize: 12, color: 'var(--text2)', lineHeight: 1.45 }}>
+                {s.detail}
+              </p>
+            </div>
+            {i === currentIndex && <Spinner size={15} color="var(--lav)" />}
           </div>
-        ))}
+          );
+        })}
       </div>
     </div>
   );
@@ -2494,6 +2659,8 @@ export default function App() {
   const [screen, setScreen] = useState('home');    // 'home' | 'processing' | 'schedule' | 'error'
   const [rx,     setRx]     = useState(null);
   const [processingError, setProcessingError] = useState('');
+  const [processingStage, setProcessingStage] = useState('preparing');
+  const [processingStartedAt, setProcessingStartedAt] = useState(null);
   const [chatOpen, setChatOpen] = useState(false);
   const [tab,    setTab]    = useState('today');    // schedule tab, lifted so sidebar can drive it
   const [unsubscribeBanner, setUnsubscribeBanner] = useState(null); // null | 'loading' | 'done' | 'error'
@@ -2579,12 +2746,15 @@ export default function App() {
 
     setScreen('processing');
     setProcessingError('');
+    setProcessingStage('preparing');
+    setProcessingStartedAt(Date.now());
 
     try {
       let parsed;
 
       if (PREVIEW && ANTH_KEY) {
         /* ── Preview mode: call Anthropic vision API directly ── */
+        setProcessingStage('reading');
         const images = await Promise.all(files.map(async (file) => ({
           type: 'image',
           source: {
@@ -2631,6 +2801,7 @@ export default function App() {
         };
         const uploadId = `rx-upload-${globalThis.crypto?.randomUUID ? globalThis.crypto.randomUUID() : Date.now()}`;
 
+        setProcessingStage('uploading');
         const uploaded = await Promise.all(files.map(async (file, index) => {
           const urlRes = await fetch(`${API_BASE}/upload-url`, {
             method: 'POST',
@@ -2655,6 +2826,7 @@ export default function App() {
           return imageKey;
         }));
 
+        setProcessingStage('reading');
         const procRes = await fetch(`${API_BASE}/process`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -2667,6 +2839,7 @@ export default function App() {
         });
         const processPayload = await procRes.json();
         if (!procRes.ok) throw new Error(errorFromPayload(processPayload, 'Could not process prescription'));
+        setProcessingStage('finishing');
         parsed = normalizePrescriptionResponse(processPayload);
 
         // NOTE: the subscription confirmation email is now sent server-side by
@@ -2680,6 +2853,7 @@ export default function App() {
       }
 
       // Ensure IDs and colors are set
+      setProcessingStage('finishing');
       parsed.medications = (parsed.medications || []).map((m, i) => ({
         ...m,
         id:    m.id    || `med${i}`,
@@ -2709,7 +2883,7 @@ export default function App() {
   const screenContent = (
     <>
       {screen === 'home'       && <HomeScreen onUpload={handleUpload} />}
-      {screen === 'processing' && <ProcessingScreen />}
+      {screen === 'processing' && <ProcessingScreen stage={processingStage} startedAt={processingStartedAt} />}
       {screen === 'error'      && <ProcessingErrorScreen error={processingError} onTryAgain={handleBack} />}
       {screen === 'schedule'   && (
         <ScheduleScreen

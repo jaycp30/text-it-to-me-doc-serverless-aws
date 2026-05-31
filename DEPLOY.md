@@ -412,9 +412,10 @@ sam deploy --guided \
   --capabilities CAPABILITY_IAM CAPABILITY_NAMED_IAM \
   --parameter-overrides \
     "BedrockModelId=apac.anthropic.claude-3-5-sonnet-20241022-v2:0" \
-    "SesFromEmail=you@yourdomain.com"
+    "SesFromEmail=you@yourdomain.com" \
+    "TurnstileSecretKey=<cloudflare-turnstile-secret>"
 ```
-Replace the `BedrockModelId` with the exact ID from Step 3b and `SesFromEmail` with your verified sender.
+Replace the `BedrockModelId` with the exact ID from Step 3b, `SesFromEmail` with your verified sender, and `TurnstileSecretKey` with the secret key from the Cloudflare Turnstile widget for this app.
 
 > Note: `samconfig.toml` currently has `stack_name = "rx-reader"`. Using `--stack-name text-it-to-me-doc` above overrides it; or edit `samconfig.toml` to match. Either is fine — just be consistent on later deploys.
 
@@ -480,6 +481,7 @@ applications:
 
 3. **Environment variables** (App settings → Environment variables):
    - `VITE_API_BASE_URL` = the `ApiUrl` from Step 5
+   - `VITE_TURNSTILE_SITE_KEY` = the Cloudflare Turnstile site key for the Amplify domain
    - (do **not** set `VITE_ANTHROPIC_KEY` in production — that path is only for local preview; prod goes through your Lambdas)
 
    ⚠️ The README mentions `VITE_API_URL` — that's a typo. The code reads **`VITE_API_BASE_URL`** (see `frontend/src/App.jsx`). Use that exact name.

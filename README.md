@@ -230,6 +230,14 @@ Required Amplify environment variable:
 VITE_API_BASE_URL=https://dr4auuv5p7.execute-api.ap-northeast-1.amazonaws.com/v1
 ```
 
+Required for the production **Send test notification** button:
+
+```text
+VITE_TURNSTILE_SITE_KEY=<Cloudflare Turnstile site key>
+```
+
+When this is set, the **Send test notification** button renders a Cloudflare Turnstile check and sends the resulting token to `/notify-test`.
+
 Do **not** set `VITE_ANTHROPIC_KEY` in Amplify. That variable only enables a local-preview chat path; production chat goes through the `/chat` Lambda.
 
 ### Backend: SAM Deployment
@@ -264,9 +272,10 @@ Set in `template.yaml` (defaults) and overridable at deploy time in `samconfig.t
 ```text
 BedrockModelId=jp.anthropic.claude-sonnet-4-6   # vision-capable Bedrock inference profile
 SesFromEmail=noreply@jaycloud.net               # verified SES sender address
+TurnstileSecretKey=<secret>                      # Cloudflare Turnstile secret for /notify-test
 ```
 
-Each Lambda also receives environment variables from the SAM `Globals` block — `PRESCRIPTIONS_TABLE`, `SCHEDULES_TABLE`, `IMAGES_BUCKET`, `BEDROCK_MODEL_ID`, `SCHEDULER_GROUP`, `SNS_TOPIC_ARN` — plus per-function values (`NOTIFIER_FUNCTION_ARN`, `SCHEDULER_ROLE_ARN`, `SES_FROM_EMAIL`). `NOTIFIER_FUNCTION_ARN` and `SCHEDULER_ROLE_ARN` are deliberately set per-function rather than in `Globals` to avoid a circular dependency on `NotifyUserFunction`.
+Each Lambda also receives environment variables from the SAM `Globals` block — `PRESCRIPTIONS_TABLE`, `SCHEDULES_TABLE`, `IMAGES_BUCKET`, `BEDROCK_MODEL_ID`, `SCHEDULER_GROUP`, `SNS_TOPIC_ARN` — plus per-function values (`NOTIFIER_FUNCTION_ARN`, `SCHEDULER_ROLE_ARN`, `SES_FROM_EMAIL`, `TURNSTILE_SECRET_KEY`). `NOTIFIER_FUNCTION_ARN` and `SCHEDULER_ROLE_ARN` are deliberately set per-function rather than in `Globals` to avoid a circular dependency on `NotifyUserFunction`.
 
 ## DynamoDB Tables
 
@@ -289,7 +298,7 @@ The frontend reminder details panel also has a **Send test notification** button
 POST /notify-test
 ```
 
-That route invokes the same `NotifyUser` Lambda with `type: "test"`, so you can verify the selected email address or phone number immediately before waiting for a scheduled medication reminder.
+That route invokes the same `NotifyUser` Lambda with `type: "test"`, so you can verify the selected email address or phone number immediately before waiting for a scheduled medication reminder. The public test route requires a valid Cloudflare Turnstile token; scheduled reminders, daily summaries, and server-side subscription confirmation emails do not use this public path.
 
 **Email (SES).** The sender is the verified `SesFromEmail`. The `jaycloud.net` domain is verified in `ap-northeast-1`, so any `@jaycloud.net` address works as a sender. Confirm production access:
 
@@ -382,6 +391,7 @@ Without `VITE_API_BASE_URL`, the app runs in demo mode (the sample prescription)
 
 ```text
 VITE_API_BASE_URL=https://dr4auuv5p7.execute-api.ap-northeast-1.amazonaws.com/v1
+VITE_TURNSTILE_SITE_KEY=<Cloudflare Turnstile site key>
 ```
 
 ---
