@@ -427,6 +427,8 @@ Replace each value:
 
 > **If you haven't done Step 6 yet:** deploy with the default (`https://localhost:5173`) first, then redeploy with the real `AppUrl` once Amplify gives you a URL.
 
+> **Why must you repeat all parameters on every deploy?** `--parameter-overrides` on the command line replaces what is saved in `samconfig.toml` entirely — it does not merge. `TurnstileSecretKey` and `MagicLinkSecret` are never written to `samconfig.toml` because they are declared `NoEcho: true` in the template; SAM intentionally excludes secrets from saved config to avoid writing them to disk. If you omit any parameter, CloudFormation falls back to the template default for that parameter instead of your last deployed value. Always pass all five parameters together.
+
 > Note: `samconfig.toml` currently has `stack_name = "rx-reader"`. Using `--stack-name text-it-to-me-doc` above overrides it; or edit `samconfig.toml` to match. Either is fine — just be consistent on later deploys.
 
 When it finishes, copy the **`ApiUrl`** output (looks like `https://abc123.execute-api.ap-northeast-1.amazonaws.com/v1`). You need it for Amplify.
