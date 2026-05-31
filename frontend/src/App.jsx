@@ -2497,6 +2497,7 @@ export default function App() {
   const [chatOpen, setChatOpen] = useState(false);
   const [tab,    setTab]    = useState('today');    // schedule tab, lifted so sidebar can drive it
   const [unsubscribeBanner, setUnsubscribeBanner] = useState(null); // null | 'loading' | 'done' | 'error'
+  const [restoring, setRestoring] = useState(false);
   const isDesktop = useIsDesktop();
 
   // Handle ?unsubscribe=userId arriving from email footer link
@@ -2513,6 +2514,57 @@ export default function App() {
       .then(res => res.json())
       .then(() => setUnsubscribeBanner('done'))
       .catch(() => setUnsubscribeBanner('error'));
+  }, []);
+
+  // Restore an existing session on load:
+  //   A) same browser  — userId already in localStorage
+  //   B) any device     — ?session=userId magic link from an email
+  // Rehydrates the prescription from GET /schedules so chat + timetable work
+  // again without re-uploading and without any login.
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    if (params.get('unsubscribe')) return;   // handled by the effect above
+    if (!API_BASE) return;
+
+    const sessionUserId = params.get('session');
+    if (sessionUserId) {
+      // Adopt the userId from the magic link, then clean the URL.
+      try { localStorage.setItem('rxreader.userId', sessionUserId); } catch { /* ignore */ }
+      window.history.replaceState({}, '', window.location.pathname);
+    }
+
+    let userId = sessionUserId;
+    if (!userId) {
+      try { userId = localStorage.getItem('rxreader.userId'); } catch { userId = null; }
+    }
+    if (!userId) return;
+
+    setRestoring(true);
+    fetch(`${API_BASE}/schedules?userId=${encodeURIComponent(userId)}`)
+      .then(res => res.json())
+      .then(data => {
+        const schedules = (data.schedules || []).filter(s => (s.medications || []).length > 0);
+        if (schedules.length === 0) return;
+
+        // Most recently created active schedule wins.
+        const latest = [...schedules].sort((a, b) =>
+          (b.createdAt || '').localeCompare(a.createdAt || ''))[0];
+
+        const restored = normalizePrescriptionResponse({
+          medications: latest.medications,
+          userTimezone: latest.userTimezone,
+        });
+        restored.medications = (restored.medications || []).map((m, i) => ({
+          ...m,
+          id:    m.id    || `med${i}`,
+          color: m.color || ['sage', 'lav', 'peach'][i % 3],
+        }));
+
+        setRx(restored);
+        setScreen('schedule');
+      })
+      .catch(() => { /* silent — the user can still upload a fresh prescription */ })
+      .finally(() => setRestoring(false));
   }, []);
 
   async function handleUpload(filesOrFile, reminderDetails = getStoredReminderDetails()) {
@@ -2684,6 +2736,17 @@ export default function App() {
     </>
   );
 
+  const RestoringBanner = restoring && (
+    <div style={{
+      position: 'fixed', top: 0, left: 0, right: 0, zIndex: 9998,
+      background: 'var(--sage-dk, #3a6b51)', color: '#fff',
+      fontSize: 13, fontWeight: 600, padding: '10px 24px', textAlign: 'center',
+      display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 10,
+    }}>
+      <Spinner size={14} color="#fff" /> Restoring your saved schedule…
+    </div>
+  );
+
   const UnsubscribeBanner = unsubscribeBanner && (
     <div style={{
       position: 'fixed', top: 0, left: 0, right: 0, zIndex: 9999,
@@ -2712,6 +2775,7 @@ export default function App() {
     return (
       <>
         <GlobalStyles />
+        {RestoringBanner}
         {UnsubscribeBanner}
         <div className="app-shell">
           <Sidebar
@@ -2742,6 +2806,7 @@ export default function App() {
   return (
     <>
       <GlobalStyles />
+      {RestoringBanner}
       {UnsubscribeBanner}
 
       <NavBar screen={screen} onBack={handleBack} />

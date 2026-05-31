@@ -17,6 +17,7 @@ const sns = new SNSClient({});
 const ses = new SESClient({});
 
 const SES_FROM_EMAIL = process.env.SES_FROM_EMAIL || "noreply@rxreader.app";
+const APP_URL        = process.env.APP_URL        || "https://main.d3bj6u7583ielg.amplifyapp.com";
 
 const RESPONSE_HEADERS = {
   "Content-Type": "application/json",
@@ -74,14 +75,75 @@ function formatTestMessage(method) {
   return `RxReader test: Your ${channel} medication reminders are working. Future dose reminders will be sent here.`;
 }
 
+function formatSubscribedMessage({ medications = [], dosesScheduled = 0, userTimezone = "" }) {
+  const medLines = medications
+    .map(m => `• ${m.name || m.medication || "Unknown"}${m.dose_mg ? ` (${m.dose_mg}mg)` : ""}`)
+    .join("\n");
+
+  return [
+    "You're subscribed to RxReader medication reminders.",
+    "",
+    medications.length > 0 ? `Medications found:\n${medLines}` : "",
+    "",
+    `${dosesScheduled} dose reminder(s) scheduled. You'll receive:`,
+    `- A daily medication summary every morning at 8am (${userTimezone || "your timezone"})`,
+    "- Individual reminders at each scheduled dose time",
+    "",
+    `To stop reminders at any time, open the app and click "Stop reminders".`,
+  ].filter(l => l !== null).join("\n");
+}
+
 // ─── HTML email builder ───────────────────────────────────────────────────────
 
-function buildHtmlEmail({ type, bodyText, dose, doses }) {
+function buildHtmlEmail({ type, bodyText, dose, doses, medications, dosesScheduled, userTimezone, userId }) {
   // ── Inner content varies by message type ──────────────────────────────────
+
+  // Magic re-entry link: opens the app and restores this user's prescription +
+  // chat without any login (no-auth session restore). The userId is the bearer
+  // credential — acceptable for this no-login app; HMAC-sign later to harden.
+  const sessionUrl = userId
+    ? `${APP_URL}/?session=${encodeURIComponent(userId)}`
+    : APP_URL;
 
   let bodyContent;
 
-  if (type === "test") {
+  if (type === "subscribed") {
+    const meds = medications || [];
+    const medItems = meds.length > 0
+      ? meds.map(m => {
+          const name    = m.name || m.medication || "Unknown";
+          const doseInfo = m.dose_mg ? ` &middot; ${m.dose_mg}mg` : "";
+          const form     = m.form    ? ` (${m.form})`              : "";
+          return `<li style="padding:5px 0;font-size:14px;color:#333;">${name}${form}${doseInfo}</li>`;
+        }).join("")
+      : `<li style="padding:5px 0;font-size:14px;color:#888;">No medications listed</li>`;
+
+    bodyContent = `
+      <p style="margin:0 0 16px;font-size:32px;line-height:1;">🔔</p>
+      <p style="margin:0 0 8px;font-size:20px;font-weight:700;color:#1b1b1b;">You're subscribed!</p>
+      <p style="margin:0 0 24px;font-size:15px;color:#555;line-height:1.6;">Medication reminders have been set up for the following:</p>
+      <ul style="margin:0 0 24px;padding-left:20px;">${medItems}</ul>
+      <table width="100%" cellpadding="0" cellspacing="0" border="0" style="margin-bottom:20px;">
+        <tr>
+          <td style="background:#f0f7f4;border-radius:8px;padding:18px 20px;">
+            <p style="margin:0 0 10px;font-size:12px;font-weight:700;color:#2d6a4f;text-transform:uppercase;letter-spacing:0.6px;">What to expect</p>
+            <p style="margin:0 0 8px;font-size:14px;color:#333;">📅 Daily summary — every morning at 8am (${userTimezone || "your timezone"})</p>
+            <p style="margin:0;font-size:14px;color:#333;">💊 ${dosesScheduled || 0} dose reminder(s) — sent at each scheduled time</p>
+          </td>
+        </tr>
+      </table>
+      <table width="100%" cellpadding="0" cellspacing="0" border="0" style="margin:0 0 20px;">
+        <tr>
+          <td align="center">
+            <a href="${sessionUrl}" style="display:inline-block;background:#2d6a4f;color:#ffffff;font-size:15px;font-weight:700;text-decoration:none;padding:13px 28px;border-radius:8px;">
+              View my schedule &amp; ask a question
+            </a>
+          </td>
+        </tr>
+      </table>
+      <p style="margin:0;font-size:13px;color:#888;line-height:1.6;">Use the button above any time to reopen your schedule and chat about your meds — no login needed. To stop reminders, open the app and click <strong>Stop reminders</strong>.</p>`;
+
+  } else if (type === "test") {
     bodyContent = `
       <p style="margin:0 0 16px;font-size:32px;line-height:1;">✅</p>
       <p style="margin:0 0 8px;font-size:20px;font-weight:700;color:#1b1b1b;">You're all set!</p>
@@ -181,9 +243,14 @@ function buildHtmlEmail({ type, bodyText, dose, doses }) {
           <!-- Footer -->
           <tr>
             <td style="background-color:#f9faf9;border-top:1px solid #eaeaea;border-radius:0 0 12px 12px;padding:20px 36px;">
-              <p style="margin:0;font-size:12px;color:#aaa;line-height:1.6;">
+              <p style="margin:0 0 6px;font-size:12px;color:#aaa;line-height:1.6;">
                 This is an automated medication reminder from RxReader. Do not reply to this email.
               </p>
+              ${userId ? `<p style="margin:0;font-size:12px;line-height:1.6;">
+                <a href="${APP_URL}/?unsubscribe=${encodeURIComponent(userId)}" style="color:#2d6a4f;text-decoration:underline;">Unsubscribe</a>
+                <span style="color:#ccc;"> &middot; </span>
+                <a href="${sessionUrl}" style="color:#aaa;text-decoration:none;">Open my schedule</a>
+              </p>` : ""}
             </td>
           </tr>
 
@@ -219,8 +286,8 @@ async function sendSMS(phoneNumber, message) {
   console.log(`SMS sent to ${phoneNumber.substring(0, 6)}****`); // partial log for privacy
 }
 
-async function sendEmail(emailAddress, subject, bodyText, emailData = {}) {
-  const htmlBody = buildHtmlEmail({ bodyText, ...emailData });
+async function sendEmail(emailAddress, subject, bodyText, emailData = {}, userId = "") {
+  const htmlBody = buildHtmlEmail({ bodyText, userId, ...emailData });
 
   const command = new SendEmailCommand({
     Source: SES_FROM_EMAIL,
@@ -262,7 +329,10 @@ module.exports.handler = async (event) => {
       contactInfo,        // phone number or email
       dose,               // single dose object (Option A)
       doses,              // array of dose objects (Option B daily summary)
-      type,               // "dose" | "daily_summary" | "test"
+      type,               // "dose" | "daily_summary" | "test" | "subscribed"
+      medications,        // array of medication objects (subscribed confirmation)
+      dosesScheduled,     // number of scheduled doses (subscribed confirmation)
+      userTimezone,       // IANA timezone string (subscribed confirmation)
     } = payload;
 
     if (!contactInfo) {
@@ -275,7 +345,10 @@ module.exports.handler = async (event) => {
 
     let message, subject;
 
-    if (type === "test") {
+    if (type === "subscribed") {
+      message = formatSubscribedMessage({ medications, dosesScheduled, userTimezone });
+      subject = "You're subscribed to RxReader reminders";
+    } else if (type === "test") {
       message = formatTestMessage(notificationMethod);
       subject = "Test medication reminder — RxReader";
     } else if (isDailySummary) {
@@ -293,7 +366,7 @@ module.exports.handler = async (event) => {
       await sendSMS(contactInfo, message);
     } else {
       // Pass structured data so buildHtmlEmail can render a richer template
-      await sendEmail(contactInfo, subject, message, { type, dose, doses });
+      await sendEmail(contactInfo, subject, message, { type, dose, doses, medications, dosesScheduled, userTimezone }, userId);
     }
 
     console.log(`[${userId}] Notification sent via ${notificationMethod}`);
