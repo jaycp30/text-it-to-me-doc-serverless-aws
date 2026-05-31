@@ -149,6 +149,22 @@ Resources:
     Type: AWS::Serverless::HttpApi
     Properties:
       StageName: v1
+      # Throttling caps abuse of this unauthenticated public API (wallet-DoS via
+      # Bedrock, SES email reputation). Stage-wide default + tighter per-route
+      # limits on the expensive/abusable endpoints.
+      DefaultRouteSettings:
+        ThrottlingBurstLimit: 20
+        ThrottlingRateLimit: 10
+      RouteSettings:
+        "POST /chat":         # Bedrock — most abusable (free LLM relay)
+          ThrottlingBurstLimit: 3
+          ThrottlingRateLimit: 1
+        "POST /process":      # Bedrock vision — expensive
+          ThrottlingBurstLimit: 2
+          ThrottlingRateLimit: 1
+        "POST /notify-test":  # SES email — reputation risk
+          ThrottlingBurstLimit: 2
+          ThrottlingRateLimit: 1
       CorsConfiguration:
         AllowOrigins:
           - "https://main.d3bj6u7583ielg.amplifyapp.com"  # tighten to your Amplify URL after first deploy
@@ -214,6 +230,10 @@ Resources:
                 - scheduler:GetSchedule
                 - iam:PassRole
               Resource: "*"
+        # Invoke NotifyUser directly to send the subscription confirmation email
+        # server-side (instead of the browser calling the public /notify-test).
+        - LambdaInvokePolicy:
+            FunctionName: !Ref NotifyUserFunction
       Events:
         Process:
           Type: HttpApi

@@ -18,6 +18,7 @@ const { DynamoDBClient } = require("@aws-sdk/client-dynamodb");
 const { DynamoDBDocumentClient, PutCommand } = require("@aws-sdk/lib-dynamodb");
 const { S3Client, GetObjectCommand } = require("@aws-sdk/client-s3");
 const { SchedulerClient, CreateScheduleCommand } = require("@aws-sdk/client-scheduler");
+const { LambdaClient, InvokeCommand } = require("@aws-sdk/client-lambda");
 const { DateTime } = require("luxon");
 const { randomUUID } = require("crypto");
 
@@ -34,6 +35,7 @@ const bedrock   = new BedrockRuntimeClient({ region: process.env.AWS_REGION });
 const dynamo    = DynamoDBDocumentClient.from(new DynamoDBClient({}));
 const s3        = new S3Client({});
 const scheduler = new SchedulerClient({});
+const lambda    = new LambdaClient({});
 
 // ─── Env vars ─────────────────────────────────────────────────────────────────
 const {
@@ -513,6 +515,32 @@ module.exports.handler = async (event) => {
       },
     }));
     console.log(`[${userId}] Saved schedule ${scheduleId} with ${scheduledDoses.length} dose reminders`);
+
+    // ── Step 5b: Send subscription confirmation email (server-side) ───────
+    // Done here via a direct async Lambda invoke rather than the browser
+    // calling the public /notify-test endpoint — keeps that endpoint off the
+    // critical path so it can be locked down. Fire-and-forget: never blocks or
+    // fails the response.
+    if ((notificationMethod || "sms") === "email" && contactInfo && NOTIFIER_FUNCTION_ARN) {
+      try {
+        await lambda.send(new InvokeCommand({
+          FunctionName: NOTIFIER_FUNCTION_ARN,
+          InvocationType: "Event", // async — don't wait for the email to send
+          Payload: Buffer.from(JSON.stringify({
+            type: "subscribed",
+            userId,
+            notificationMethod: "email",
+            contactInfo,
+            medications: prescription.medications || [],
+            dosesScheduled: scheduledDoses.length,
+            userTimezone: timezone,
+          })),
+        }));
+        console.log(`[${userId}] Queued subscription confirmation email`);
+      } catch (notifyError) {
+        console.error(`[${userId}] Failed to queue subscription email:`, notifyError.message);
+      }
+    }
 
     // ── Step 6: Respond to frontend ───────────────────────────────────────
     return {

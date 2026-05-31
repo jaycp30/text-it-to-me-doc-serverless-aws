@@ -2669,24 +2669,10 @@ export default function App() {
         if (!procRes.ok) throw new Error(errorFromPayload(processPayload, 'Could not process prescription'));
         parsed = normalizePrescriptionResponse(processPayload);
 
-        // Fire-and-forget subscription confirmation email.
-        // Gives the user immediate proof that reminders are set up, before the
-        // first dose reminder or daily summary arrives.
-        if (uploadContext.notificationMethod === 'email' && uploadContext.contactInfo) {
-          fetch(`${API_BASE}/notify-test`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              type: 'subscribed',
-              userId: uploadContext.userId,
-              notificationMethod: 'email',
-              contactInfo: uploadContext.contactInfo,
-              medications: processPayload.prescription?.medications || [],
-              dosesScheduled: processPayload.summary?.dosesScheduled || 0,
-              userTimezone: uploadContext.userTimezone,
-            }),
-          }).catch(err => console.warn('Subscription confirmation email failed silently:', err));
-        }
+        // NOTE: the subscription confirmation email is now sent server-side by
+        // the ProcessPrescription Lambda (it async-invokes NotifyUser). The
+        // browser no longer calls the public /notify-test endpoint for this, so
+        // that endpoint stays off the critical path and can be locked down.
 
       } else {
         // No key and no backend — fall back to mock
