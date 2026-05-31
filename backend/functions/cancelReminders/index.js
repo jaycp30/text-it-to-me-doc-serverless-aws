@@ -51,36 +51,50 @@ module.exports.handler = async (event) => {
       };
     }
 
-    // 2. Delete each EventBridge Scheduler rule by its stored name
+    // 2. Flatten every schedule rule name across all of the user's records,
+    //    then delete them in parallel. A user with recurring meds can have
+    //    dozens of rules; sequential deletes would add seconds and risk the
+    //    API Gateway 30s timeout.
+    const ruleNames = schedules.flatMap((schedule) =>
+      (schedule.scheduledDoses || [])
+        .map((dose) => dose.scheduleName)
+        .filter(Boolean)
+    );
+
+    const deleteResults = await Promise.allSettled(
+      ruleNames.map((name) =>
+        scheduler.send(new DeleteScheduleCommand({
+          Name: name,
+          GroupName: SCHEDULER_GROUP,
+        }))
+      )
+    );
+
     let cancelledCount = 0;
-
-    for (const schedule of schedules) {
-      for (const dose of schedule.scheduledDoses || []) {
-        if (!dose.scheduleName) continue;
-
-        try {
-          await scheduler.send(new DeleteScheduleCommand({
-            Name: dose.scheduleName,
-            GroupName: SCHEDULER_GROUP,
-          }));
-          cancelledCount++;
-        } catch (err) {
-          // Already fired and auto-deleted — that's fine
-          if (err.name !== "ResourceNotFoundException") {
-            console.error(`Failed to delete schedule ${dose.scheduleName}:`, err.message);
-          }
-        }
+    deleteResults.forEach((result, i) => {
+      if (result.status === "fulfilled") {
+        cancelledCount++;
+      } else if (result.reason?.name === "ResourceNotFoundException") {
+        // Already fired and auto-deleted — that's fine, count it as handled
+        cancelledCount++;
+      } else {
+        console.error(`Failed to delete schedule ${ruleNames[i]}:`, result.reason?.message);
       }
+    });
 
-      // 3. Mark the DynamoDB record inactive so DailySummary skips this user
-      await dynamo.send(new UpdateCommand({
-        TableName: SCHEDULES_TABLE,
-        Key: { userId: schedule.userId, scheduleId: schedule.scheduleId },
-        UpdateExpression: "SET #active = :false",
-        ExpressionAttributeNames: { "#active": "active" },
-        ExpressionAttributeValues: { ":false": false },
-      }));
-    }
+    // 3. Mark every DynamoDB record inactive (in parallel) so DailySummary
+    //    skips this user.
+    await Promise.allSettled(
+      schedules.map((schedule) =>
+        dynamo.send(new UpdateCommand({
+          TableName: SCHEDULES_TABLE,
+          Key: { userId: schedule.userId, scheduleId: schedule.scheduleId },
+          UpdateExpression: "SET #active = :false",
+          ExpressionAttributeNames: { "#active": "active" },
+          ExpressionAttributeValues: { ":false": false },
+        }))
+      )
+    );
 
     console.log(`[${userId}] Cancelled ${cancelledCount} reminder(s) across ${schedules.length} schedule(s)`);
 
