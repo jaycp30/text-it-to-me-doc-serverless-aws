@@ -20,6 +20,7 @@ Globals:
         BEDROCK_MODEL_ID:     !Ref BedrockModelId
         SCHEDULER_GROUP:      rx-medication-reminders
         SNS_TOPIC_ARN:        !Ref NotificationTopic
+        APP_URL:              "https://main.d3bj6u7583ielg.amplifyapp.com"
         # NOTIFIER_FUNCTION_ARN and SCHEDULER_ROLE_ARN are set per-function
         # (not here) to avoid a circular dependency on NotifyUserFunction.
 
