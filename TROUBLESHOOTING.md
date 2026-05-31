@@ -26,6 +26,32 @@ A Git push does not deploy the backend. Run `sam build && sam deploy`.
 
 During `sam deploy --guided`, a value prompt was answered with `y` instead of Enter, which set the region (or another value) to the literal string `y`. Re-run and press Enter to accept bracketed defaults, or use plain `sam deploy` to read values from `samconfig.toml`.
 
+### Prescription Reads OK But "0 Dose Reminders" Are Scheduled
+
+**Symptom.** `/process` succeeds and the schedule renders in the UI, but `rx-process-prescription` logs end with `Saved schedule … with 0 dose reminders`, and CloudWatch shows repeated errors like:
+
+```text
+ERROR  Failed to schedule dose for prednisolone on 2026-06-01:
+       Value 'rx-<uuid>-2026-06-01-0800-prednisolone' at 'name'
+       failed to satisfy constraint: Member must have length less than or equal to 64
+```
+
+**Cause.** EventBridge Scheduler's `Name` field has a **64-character hard limit**. The original code built the name from `rx-` + a 36-char schedule UUID + date + time + medication name (≈68 chars) and truncated to `512` — the wrong limit, so every dose failed validation and nothing was scheduled.
+
+**Fix.** `createDoseSchedule` now builds a short, collision-proof name — `rx-<date>-<time>-<medSlug(18)>-<random8>` — capped at 64 characters (worst case ≈46). The stored `scheduleName` still flows into DynamoDB so opt-out/unsubscribe deletion keeps working.
+
+> Diagnosing this: tail `/aws/lambda/rx-process-prescription` after an upload. A clean run logs `Saved schedule … with N dose reminders` (N > 0). Any `failed to satisfy constraint` error on `name` points back to the 64-char limit.
+
+### NetworkError When Attempting To Fetch Resource (During Upload)
+
+**Symptom.** The upload screen shows `NetworkError when attempting to fetch resource` and no schedule is created. Retrying sometimes succeeds.
+
+**Cause.** `/process` runs Bedrock synchronously and can take ~20–27s. It sits behind an HTTP API, which has a **hard 30-second integration timeout that cannot be raised**. A cold start plus a complex prescription (large taper) can push a single request past 30s; API Gateway then drops the connection and the browser reports a `NetworkError` (not an HTTP status). A warm Lambda on retry usually lands under 30s, which is why a second attempt often works.
+
+**Diagnosis.** In DevTools → Network, the `process` request dies around the 30s mark. Confirm in CloudWatch whether the Lambda finished after the client gave up. A successful run reports `Duration: ~20000 ms` — close to, but under, the ceiling.
+
+**Mitigation / fix.** Short term: keep `max_tokens` and the system prompt tight to speed Bedrock up. Proper fix: make `/process` asynchronous — return `202` immediately and have the frontend poll `GET /schedules` until the schedule is ready. This removes the 30s ceiling entirely.
+
 ---
 
 ## Known Limitations

@@ -24,6 +24,11 @@ const { randomUUID } = require("crypto");
 const MAX_IMAGES = 5;
 const BEDROCK_IMAGE_TYPES = new Set(["image/jpeg", "image/png", "image/webp"]);
 
+// Recurring / maintenance meds come back from Bedrock with date: null and only
+// a time-of-day. We expand each into one dated dose per day across a window.
+const DEFAULT_RECURRING_DAYS = 30;    // horizon for open-ended meds (no end_date/duration)
+const MAX_OCCURRENCES_PER_DOSE = 60;  // safety cap on EventBridge rules per dose entry
+
 // ─── AWS clients ─────────────────────────────────────────────────────────────
 const bedrock   = new BedrockRuntimeClient({ region: process.env.AWS_REGION });
 const dynamo    = DynamoDBDocumentClient.from(new DynamoDBClient({}));
@@ -234,6 +239,50 @@ function parsePrescription(rawText) {
 }
 
 /**
+ * Expand a single dose entry into one or more DATED dose objects.
+ *
+ * - A dose that already has a `date` (taper / fixed-with-date) is returned as-is.
+ * - A date-less dose (recurring / maintenance med, e.g. "1 capsule once daily")
+ *   is expanded into one dated dose per day across a window:
+ *     start = later of (prescription date, today)   — never schedule the past
+ *     end   = med.end_date, else prescriptionDate + duration_days,
+ *             else today + DEFAULT_RECURRING_DAYS    — open-ended maintenance
+ *   capped at MAX_OCCURRENCES_PER_DOSE to bound the number of EventBridge rules.
+ */
+function expandDoseToDates({ med, dose, prescriptionDate, timezone }) {
+  if (dose.date) return [dose];          // already dated — taper/fixed
+  if (!dose.time) return [];             // no time either — cannot schedule
+
+  const today  = DateTime.now().setZone(timezone).startOf("day");
+  const rxStart = prescriptionDate
+    ? DateTime.fromISO(prescriptionDate, { zone: timezone }).startOf("day")
+    : today;
+
+  // Never generate past dates — start from the later of rx date and today.
+  const start = rxStart > today ? rxStart : today;
+
+  // Determine the end of the window.
+  let end;
+  if (med.end_date) {
+    end = DateTime.fromISO(med.end_date, { zone: timezone }).startOf("day");
+  } else if (med.duration_days) {
+    end = rxStart.plus({ days: med.duration_days - 1 });
+  } else {
+    end = today.plus({ days: DEFAULT_RECURRING_DAYS });
+  }
+
+  if (!end.isValid || end < start) return [];
+
+  const dates = [];
+  let cursor = start;
+  while (cursor <= end && dates.length < MAX_OCCURRENCES_PER_DOSE) {
+    dates.push({ ...dose, date: cursor.toISODate() });
+    cursor = cursor.plus({ days: 1 });
+  }
+  return dates;
+}
+
+/**
  * Create a single EventBridge Scheduler rule for one dose event.
  * The rule fires once at the exact dose time, then auto-deletes.
  */
@@ -375,6 +424,10 @@ module.exports.handler = async (event) => {
     const scheduledDoses = [];
     const skippedDoses = [];
 
+    // Phase 1: flatten every medication into a list of dated dose objects.
+    // Recurring/date-less doses are expanded here; tapers pass through.
+    const dosesToSchedule = [];
+
     for (const med of prescription.medications || []) {
       // Skip PRN (as needed) — these have no fixed schedule
       if (med.schedule_type === "prn") {
@@ -385,37 +438,61 @@ module.exports.handler = async (event) => {
       for (const dose of med.doses || []) {
         if (dose.as_needed) continue;
 
-        const doseWithMed = {
-          medication: med.name,
-          brand: med.brand,
-          form: med.form,
-          dose_mg: med.dose_mg,
-          special_instructions: med.special_instructions,
-          ...dose,
-        };
+        const datedDoses = expandDoseToDates({
+          med,
+          dose,
+          prescriptionDate: prescription.prescription_date,
+          timezone,
+        });
 
-        try {
-          const scheduleName = await createDoseSchedule({
-            scheduleId,
-            dose: doseWithMed,
-            userId,
-            userTimezone: timezone,
-            notificationMethod: notificationMethod || "sms",
-            contactInfo,
+        if (datedDoses.length === 0) {
+          console.log(`Skipping dose with no schedulable date/time for ${med.name}:`, dose);
+          skippedDoses.push({ medication: med.name, ...dose });
+          continue;
+        }
+
+        for (const datedDose of datedDoses) {
+          dosesToSchedule.push({
+            medication: med.name,
+            brand: med.brand,
+            form: med.form,
+            dose_mg: med.dose_mg,
+            special_instructions: med.special_instructions,
+            ...datedDose,
           });
-
-          if (scheduleName) {
-            scheduledDoses.push({ ...doseWithMed, scheduleName });
-          } else {
-            skippedDoses.push(doseWithMed);
-          }
-        } catch (scheduleError) {
-          // Don't fail the whole request if one schedule fails
-          console.error(`Failed to schedule dose for ${med.name} on ${dose.date}:`, scheduleError.message);
-          skippedDoses.push(doseWithMed);
         }
       }
     }
+
+    // Phase 2: create all EventBridge rules in parallel. With recurring meds a
+    // prescription can expand to dozens of doses; running these sequentially
+    // would add seconds and risk the API Gateway 30s timeout.
+    console.log(`[${userId}] Creating ${dosesToSchedule.length} schedule(s) in parallel`);
+    const results = await Promise.allSettled(
+      dosesToSchedule.map((doseWithMed) =>
+        createDoseSchedule({
+          scheduleId,
+          dose: doseWithMed,
+          userId,
+          userTimezone: timezone,
+          notificationMethod: notificationMethod || "sms",
+          contactInfo,
+        })
+      )
+    );
+
+    results.forEach((result, i) => {
+      const doseWithMed = dosesToSchedule[i];
+      if (result.status === "fulfilled" && result.value) {
+        scheduledDoses.push({ ...doseWithMed, scheduleName: result.value });
+      } else if (result.status === "fulfilled") {
+        // null = skipped (past dose)
+        skippedDoses.push(doseWithMed);
+      } else {
+        console.error(`Failed to schedule dose for ${doseWithMed.medication} on ${doseWithMed.date}:`, result.reason?.message);
+        skippedDoses.push(doseWithMed);
+      }
+    });
 
     // ── Step 5: Save schedule to DynamoDB (for Option B daily summary) ─────
     await dynamo.send(new PutCommand({
