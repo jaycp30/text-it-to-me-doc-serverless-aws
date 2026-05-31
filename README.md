@@ -41,12 +41,12 @@ text-it-to-me-doc-app/
 1. The user opens the Amplify-hosted site and either tries **demo mode** (a built-in sample prescription) or uploads 1-5 photos/screenshots of a real prescription.
 2. For a real upload, the frontend creates one `uploadId`, then calls `POST /upload-url` once per page and receives a short-lived presigned S3 URL plus an `imageKey`.
 3. The browser `PUT`s each image directly to S3 using those URLs, so the images never pass through Lambda or API Gateway payload limits.
-4. The frontend calls `POST /process` with `imageKeys`, `uploadId`, a local browser profile ID, timezone, notification method, and contact info.
-5. `ProcessPrescription` fetches the images from S3 and sends them together to Amazon Bedrock, which returns the medications and dose times as structured JSON.
+4. The frontend calls `POST /process` with `imageKeys`, `uploadId`, a local browser profile ID, timezone, notification method, and contact info. `uploadId` is used as an idempotency key so repeat submissions of the same upload do not create duplicate reminder schedules.
+5. `ProcessPrescription` first records a DynamoDB processing lock, then fetches the images from S3 and sends them together to Amazon Bedrock, which returns the medications and dose times as structured JSON.
 6. The Lambda stores the prescription and schedule in DynamoDB, then creates one EventBridge Scheduler rule per future dose (each fires once and auto-deletes).
 7. At each dose time, the Scheduler invokes `NotifyUser`, which sends an SMS (SNS) or email (SES) reminder for that dose — this is **Option A**, exact per-dose reminders.
 8. Independently, an hourly EventBridge cron invokes `DailySummary`, which scans active schedules and, when it is morning in the user's timezone, calls `NotifyUser` with a "today's medications" summary — this is **Option B**.
-9. `GET /schedules` returns the user's active schedules so the frontend can render the current timetable.
+9. `GET /schedules` returns the user's active schedules so the frontend can render the current timetable. Restore links can request inactive schedules too, allowing the app to show a friendly cancelled-schedule state.
 10. `POST /chat` answers medication questions about the current prescription, with guardrails that refuse dose changes, diagnoses, and off-topic questions.
 11. `DELETE /reminders/{userId}` cancels all upcoming reminders. The `CancelReminders` Lambda queries DynamoDB for all active schedule records, deletes each linked EventBridge Scheduler rule by name, and marks every record inactive so `DailySummary` skips the user. Rules that have already fired are ignored. The frontend exposes this as a **Stop reminders** button in the reminder details panel.
 
@@ -336,8 +336,8 @@ Users can cancel all upcoming reminders at any time directly from the app:
 3. The app calls `DELETE /reminders/{userId}`, which:
    - Queries `rx-schedules` for all active schedule records belonging to that browser profile.
    - Deletes every linked EventBridge Scheduler rule by name — so no future dose notifications will fire.
-   - Marks each schedule record `active: false` in DynamoDB, so the hourly `DailySummary` cron also skips this user.
-4. A confirmation message is shown inline once the cancellation completes.
+   - Marks each schedule record `active: false` and `processingStatus: cancelled` in DynamoDB, so the hourly `DailySummary` cron also skips this user.
+4. A confirmation message is shown inline once the cancellation completes. If the user later opens an old schedule link, the app explains that the schedule was cancelled and offers a new upload path.
 
 **What opt-out does not cover:**
 - Doses whose Scheduler rules have already fired (those reminders have already been sent and the rules auto-deleted).

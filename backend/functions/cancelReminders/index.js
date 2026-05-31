@@ -89,9 +89,16 @@ module.exports.handler = async (event) => {
         dynamo.send(new UpdateCommand({
           TableName: SCHEDULES_TABLE,
           Key: { userId: schedule.userId, scheduleId: schedule.scheduleId },
-          UpdateExpression: "SET #active = :false",
-          ExpressionAttributeNames: { "#active": "active" },
-          ExpressionAttributeValues: { ":false": false },
+          UpdateExpression: "SET #active = :false, #status = :cancelled, cancelledAt = :now, updatedAt = :now",
+          ExpressionAttributeNames: {
+            "#active": "active",
+            "#status": "processingStatus",
+          },
+          ExpressionAttributeValues: {
+            ":false": false,
+            ":cancelled": "cancelled",
+            ":now": new Date().toISOString(),
+          },
         }))
       )
     );

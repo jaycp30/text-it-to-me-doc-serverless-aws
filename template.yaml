@@ -222,6 +222,8 @@ Resources:
             TableName: !Ref PrescriptionsTable
         - DynamoDBWritePolicy:
             TableName: !Ref SchedulesTable
+        - DynamoDBReadPolicy:
+            TableName: !Ref SchedulesTable
         - Statement:
             - Effect: Allow
               Action:

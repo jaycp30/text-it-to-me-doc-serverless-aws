@@ -15,12 +15,12 @@
 
 const { BedrockRuntimeClient, InvokeModelCommand } = require("@aws-sdk/client-bedrock-runtime");
 const { DynamoDBClient } = require("@aws-sdk/client-dynamodb");
-const { DynamoDBDocumentClient, PutCommand } = require("@aws-sdk/lib-dynamodb");
+const { DynamoDBDocumentClient, GetCommand, PutCommand, UpdateCommand } = require("@aws-sdk/lib-dynamodb");
 const { S3Client, GetObjectCommand } = require("@aws-sdk/client-s3");
 const { SchedulerClient, CreateScheduleCommand } = require("@aws-sdk/client-scheduler");
 const { LambdaClient, InvokeCommand } = require("@aws-sdk/client-lambda");
 const { DateTime } = require("luxon");
-const { randomUUID } = require("crypto");
+const { createHash, randomUUID } = require("crypto");
 
 const MAX_IMAGES = 5;
 const BEDROCK_IMAGE_TYPES = new Set(["image/jpeg", "image/png", "image/webp"]);
@@ -348,12 +348,79 @@ function ttlOneYear() {
   return Math.floor(Date.now() / 1000) + 365 * 24 * 60 * 60;
 }
 
+function shortHash(value, length = 32) {
+  return createHash("sha256").update(String(value)).digest("hex").slice(0, length);
+}
+
+function getIdempotencyKey({ uploadId, keys, userId }) {
+  const source = uploadId || keys.join("|");
+  return shortHash(`${userId}:${source}`, 40);
+}
+
+function responseFromCompletedSchedule(schedule, headers, replay = false) {
+  const medications = schedule.prescription?.medications || schedule.medications || [];
+  const scheduledDoses = schedule.scheduledDoses || [];
+  const skippedDoses = schedule.skippedDoses || [];
+
+  return {
+    statusCode: 200,
+    headers,
+    body: JSON.stringify({
+      idempotentReplay: replay,
+      prescriptionId: schedule.prescriptionId,
+      scheduleId: schedule.scheduleId,
+      prescription: schedule.prescription || { medications },
+      summary: {
+        medicationsFound: medications.length,
+        dosesScheduled: scheduledDoses.length,
+        dosesSkipped: skippedDoses.length,
+        skippedReason: skippedDoses.length > 0 ? "Doses in the past or PRN medications are not scheduled" : null,
+      },
+      message: `Found ${medications.length} medication(s). ${scheduledDoses.length} dose reminder(s) scheduled.`,
+    }),
+  };
+}
+
+async function getExistingSchedule(userId, scheduleId) {
+  const result = await dynamo.send(new GetCommand({
+    TableName: SCHEDULES_TABLE,
+    Key: { userId, scheduleId },
+  }));
+  return result.Item;
+}
+
+async function markScheduleFailed({ userId, scheduleId, message }) {
+  if (!userId || !scheduleId) return;
+
+  try {
+    await dynamo.send(new UpdateCommand({
+      TableName: SCHEDULES_TABLE,
+      Key: { userId, scheduleId },
+      UpdateExpression: "SET #status = :failed, #active = :false, failureMessage = :message, updatedAt = :now",
+      ExpressionAttributeNames: {
+        "#status": "processingStatus",
+        "#active": "active",
+      },
+      ExpressionAttributeValues: {
+        ":failed": "failed",
+        ":false": false,
+        ":message": message,
+        ":now": new Date().toISOString(),
+      },
+    }));
+  } catch (error) {
+    console.error(`[${userId}] Failed to mark idempotent schedule as failed:`, error.message);
+  }
+}
+
 // ─── Handler ──────────────────────────────────────────────────────────────────
 module.exports.handler = async (event) => {
   const headers = {
     "Content-Type": "application/json",
     "Access-Control-Allow-Origin": "*",
   };
+
+  let lockedSchedule = null;
 
   try {
     const body = JSON.parse(event.body || "{}");
@@ -376,6 +443,64 @@ module.exports.handler = async (event) => {
     if (!contactInfo) return { statusCode: 400, headers, body: JSON.stringify({ error: "contactInfo (phone or email) is required" }) };
 
     const timezone = userTimezone || "Asia/Manila";
+    const idempotencyKey = getIdempotencyKey({ uploadId, keys, userId });
+    const prescriptionId = `rx-${idempotencyKey}`;
+    const scheduleId = `sched-${idempotencyKey}`;
+    const now = new Date().toISOString();
+    const expiresAt = ttlOneYear();
+
+    // Acquire an idempotency lock before any expensive or side-effecting work.
+    // A duplicate request with the same uploadId should not call Bedrock or
+    // create another batch of EventBridge schedules.
+    try {
+      await dynamo.send(new PutCommand({
+        TableName: SCHEDULES_TABLE,
+        Item: {
+          userId,
+          scheduleId,
+          prescriptionId,
+          uploadId,
+          imageKeys: keys,
+          idempotencyKey,
+          processingStatus: "processing",
+          active: false,
+          userTimezone: timezone,
+          notificationMethod: notificationMethod || "sms",
+          contactInfo,
+          createdAt: now,
+          updatedAt: now,
+          expiresAt,
+        },
+        ConditionExpression: "attribute_not_exists(userId) AND attribute_not_exists(scheduleId)",
+      }));
+      lockedSchedule = { userId, scheduleId };
+    } catch (error) {
+      if (error.name !== "ConditionalCheckFailedException") throw error;
+
+      const existing = await getExistingSchedule(userId, scheduleId);
+      if (existing?.processingStatus === "complete") {
+        console.log(`[${userId}] Returning idempotent schedule replay for ${scheduleId}`);
+        return responseFromCompletedSchedule(existing, headers, true);
+      }
+
+      if (existing?.processingStatus === "failed") {
+        return {
+          statusCode: 409,
+          headers,
+          body: JSON.stringify({
+            error: "This upload already failed. Please choose the prescription pages again to start a fresh upload.",
+          }),
+        };
+      }
+
+      return {
+        statusCode: 409,
+        headers,
+        body: JSON.stringify({
+          error: "This prescription is already being processed. Please wait for the current request to finish.",
+        }),
+      };
+    }
 
     // ── Step 1: Get image(s) from S3 ──────────────────────────────────────
     console.log(`[${userId}] Fetching ${keys.length} image(s): ${keys.join(", ")}`);
@@ -392,6 +517,7 @@ module.exports.handler = async (event) => {
     } catch (parseError) {
       console.error("Parse error:", parseError.message);
       console.error("Raw response was:", rawResponse);
+      await markScheduleFailed({ userId, scheduleId, message: parseError.message });
       return {
         statusCode: 422,
         headers,
@@ -402,10 +528,6 @@ module.exports.handler = async (event) => {
       };
     }
 
-    const prescriptionId = randomUUID();
-    const scheduleId = randomUUID();
-    const now = new Date().toISOString();
-
     // ── Step 3: Save prescription to DynamoDB ─────────────────────────────
     await dynamo.send(new PutCommand({
       TableName: PRESCRIPTIONS_TABLE,
@@ -415,9 +537,10 @@ module.exports.handler = async (event) => {
         imageKey: keys[0],
         imageKeys: keys,
         uploadId,
+        idempotencyKey,
         prescription,
         createdAt: now,
-        expiresAt: ttlOneYear(),
+        expiresAt,
       },
     }));
     console.log(`[${userId}] Saved prescription ${prescriptionId}`);
@@ -497,21 +620,38 @@ module.exports.handler = async (event) => {
     });
 
     // ── Step 5: Save schedule to DynamoDB (for Option B daily summary) ─────
-    await dynamo.send(new PutCommand({
+    await dynamo.send(new UpdateCommand({
       TableName: SCHEDULES_TABLE,
-      Item: {
-        userId,
-        scheduleId,
-        prescriptionId,
-        medications: prescription.medications,
-        scheduledDoses,
-        skippedDoses,
-        userTimezone: timezone,
-        notificationMethod: notificationMethod || "sms",
-        contactInfo,
-        active: true,
-        createdAt: now,
-        expiresAt: ttlOneYear(),
+      Key: { userId, scheduleId },
+      UpdateExpression: [
+        "SET #status = :complete",
+        "#active = :true",
+        "prescription = :prescription",
+        "medications = :medications",
+        "scheduledDoses = :scheduledDoses",
+        "skippedDoses = :skippedDoses",
+        "userTimezone = :timezone",
+        "notificationMethod = :notificationMethod",
+        "contactInfo = :contactInfo",
+        "updatedAt = :now",
+        "expiresAt = :expiresAt",
+      ].join(", "),
+      ExpressionAttributeNames: {
+        "#status": "processingStatus",
+        "#active": "active",
+      },
+      ExpressionAttributeValues: {
+        ":complete": "complete",
+        ":true": true,
+        ":prescription": prescription,
+        ":medications": prescription.medications,
+        ":scheduledDoses": scheduledDoses,
+        ":skippedDoses": skippedDoses,
+        ":timezone": timezone,
+        ":notificationMethod": notificationMethod || "sms",
+        ":contactInfo": contactInfo,
+        ":now": new Date().toISOString(),
+        ":expiresAt": expiresAt,
       },
     }));
     console.log(`[${userId}] Saved schedule ${scheduleId} with ${scheduledDoses.length} dose reminders`);
@@ -543,25 +683,18 @@ module.exports.handler = async (event) => {
     }
 
     // ── Step 6: Respond to frontend ───────────────────────────────────────
-    return {
-      statusCode: 200,
-      headers,
-      body: JSON.stringify({
-        prescriptionId,
-        scheduleId,
-        prescription,
-        summary: {
-          medicationsFound: prescription.medications?.length || 0,
-          dosesScheduled: scheduledDoses.length,
-          dosesSkipped: skippedDoses.length,
-          skippedReason: skippedDoses.length > 0 ? "Doses in the past or PRN medications are not scheduled" : null,
-        },
-        message: `Found ${prescription.medications?.length || 0} medication(s). ${scheduledDoses.length} dose reminder(s) scheduled.`,
-      }),
-    };
+    return responseFromCompletedSchedule({
+      prescriptionId,
+      scheduleId,
+      prescription,
+      medications: prescription.medications,
+      scheduledDoses,
+      skippedDoses,
+    }, headers);
 
   } catch (error) {
     console.error("Unhandled error:", error);
+    await markScheduleFailed({ ...lockedSchedule, message: error.message });
     return {
       statusCode: 500,
       headers,

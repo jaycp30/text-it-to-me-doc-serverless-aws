@@ -1705,6 +1705,91 @@ function ProcessingErrorScreen({ error, onTryAgain }) {
   );
 }
 
+function CancelledScheduleScreen({ schedule, onNewUpload }) {
+  const meds = schedule?.medications || schedule?.prescription?.medications || [];
+  const cancelledAt = schedule?.cancelledAt
+    ? new Date(schedule.cancelledAt).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' })
+    : null;
+
+  return (
+    <div style={{ padding: '24px 20px 40px' }}>
+      <div
+        className="glass anim-fade-up"
+        style={{
+          borderRadius: 'var(--r-xl)',
+          padding: '24px 20px',
+          border: '1px solid rgba(232,146,124,0.28)',
+          background: 'var(--peach-lt)',
+        }}
+      >
+        <div className="icon-well" style={{
+          width: 56, height: 56, borderRadius: 'var(--r-lg)',
+          background: 'rgba(232,146,124,0.16)', color: 'var(--peach)',
+          marginBottom: 16,
+        }}><Icon name="alert" size={27} strokeWidth={2} /></div>
+
+        <p style={{
+          fontFamily: 'var(--font-head)', fontWeight: 700,
+          fontSize: 21, color: 'var(--text)', marginBottom: 8,
+        }}>
+          This schedule was cancelled
+        </p>
+        <p style={{ fontSize: 14, color: 'var(--text2)', lineHeight: 1.65, marginBottom: 14 }}>
+          Reminder links for this prescription still open the app, but no more notifications will be sent for this schedule.
+          {cancelledAt ? ` It was cancelled on ${cancelledAt}.` : ''}
+        </p>
+
+        {meds.length > 0 && (
+          <div style={{
+            borderRadius: 'var(--r-lg)',
+            background: 'rgba(255,255,255,0.34)',
+            border: '1px solid rgba(232,146,124,0.20)',
+            padding: '13px 14px',
+            marginBottom: 16,
+          }}>
+            <p style={{
+              fontFamily: 'var(--font-head)', fontWeight: 700,
+              fontSize: 13, color: 'var(--text)', marginBottom: 8,
+            }}>
+              Cancelled prescription
+            </p>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+              {meds.slice(0, 4).map((med, index) => (
+                <p key={`${med.name || 'med'}-${index}`} style={{
+                  fontSize: 13,
+                  color: 'var(--text2)',
+                  lineHeight: 1.45,
+                }}>
+                  <strong style={{ color: 'var(--text)' }}>{med.name || med.medication || 'Medication'}</strong>
+                  {med.dose_mg ? ` · ${med.dose_mg}mg` : ''}
+                </p>
+              ))}
+              {meds.length > 4 && (
+                <p style={{ fontSize: 12, color: 'var(--text3)' }}>
+                  +{meds.length - 4} more
+                </p>
+              )}
+            </div>
+          </div>
+        )}
+
+        <button
+          onClick={onNewUpload}
+          style={{
+            width: '100%', padding: '14px', borderRadius: 'var(--r-full)',
+            background: 'var(--sage)', color: '#fff',
+            fontFamily: 'var(--font-head)', fontWeight: 600, fontSize: 15,
+            display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8,
+            boxShadow: 'var(--sh-btn-sage)',
+          }}
+        >
+          <Icon name="camera" size={18} strokeWidth={2} /> Upload a new prescription
+        </button>
+      </div>
+    </div>
+  );
+}
+
 /* ─────────────────────────────────────────────────────────────────────────────
    TAPER CHART
 ───────────────────────────────────────────────────────────────────────────── */
@@ -2656,8 +2741,9 @@ function ChatDrawer({ open, onClose, rx, isDesktop = false }) {
    ROOT APP
 ───────────────────────────────────────────────────────────────────────────── */
 export default function App() {
-  const [screen, setScreen] = useState('home');    // 'home' | 'processing' | 'schedule' | 'error'
+  const [screen, setScreen] = useState('home');    // 'home' | 'processing' | 'schedule' | 'error' | 'cancelled'
   const [rx,     setRx]     = useState(null);
+  const [cancelledSchedule, setCancelledSchedule] = useState(null);
   const [processingError, setProcessingError] = useState('');
   const [processingStage, setProcessingStage] = useState('preparing');
   const [processingStartedAt, setProcessingStartedAt] = useState(null);
@@ -2707,19 +2793,29 @@ export default function App() {
     if (!userId) return;
 
     setRestoring(true);
-    fetch(`${API_BASE}/schedules?userId=${encodeURIComponent(userId)}`)
+    fetch(`${API_BASE}/schedules?userId=${encodeURIComponent(userId)}&includeInactive=true`)
       .then(res => res.json())
       .then(data => {
         const schedules = (data.schedules || []).filter(s => (s.medications || []).length > 0);
         if (schedules.length === 0) return;
 
-        // Most recently created active schedule wins.
-        const latest = [...schedules].sort((a, b) =>
-          (b.createdAt || '').localeCompare(a.createdAt || ''))[0];
+        const sorted = [...schedules].sort((a, b) =>
+          (b.updatedAt || b.createdAt || '').localeCompare(a.updatedAt || a.createdAt || ''));
+        const latestActive = sorted.find(s => s.active);
+
+        if (!latestActive) {
+          const latestCancelled = sorted.find(s => s.processingStatus === 'cancelled' || s.active === false);
+          if (latestCancelled) {
+            setCancelledSchedule(latestCancelled);
+            setRx(null);
+            setScreen('cancelled');
+          }
+          return;
+        }
 
         const restored = normalizePrescriptionResponse({
-          medications: latest.medications,
-          userTimezone: latest.userTimezone,
+          medications: latestActive.medications,
+          userTimezone: latestActive.userTimezone,
         });
         restored.medications = (restored.medications || []).map((m, i) => ({
           ...m,
@@ -2728,6 +2824,7 @@ export default function App() {
         }));
 
         setRx(restored);
+        setCancelledSchedule(null);
         setScreen('schedule');
       })
       .catch(() => { /* silent — the user can still upload a fresh prescription */ })
@@ -2861,6 +2958,7 @@ export default function App() {
       }));
 
       setRx(parsed);
+      setCancelledSchedule(null);
       setScreen('schedule');
 
     } catch (err) {
@@ -2874,6 +2972,7 @@ export default function App() {
   function handleBack() {
     setScreen('home');
     setRx(null);
+    setCancelledSchedule(null);
     setProcessingError('');
     setChatOpen(false);
     setTab('today');
@@ -2885,6 +2984,7 @@ export default function App() {
       {screen === 'home'       && <HomeScreen onUpload={handleUpload} />}
       {screen === 'processing' && <ProcessingScreen stage={processingStage} startedAt={processingStartedAt} />}
       {screen === 'error'      && <ProcessingErrorScreen error={processingError} onTryAgain={handleBack} />}
+      {screen === 'cancelled'  && <CancelledScheduleScreen schedule={cancelledSchedule} onNewUpload={handleBack} />}
       {screen === 'schedule'   && (
         <ScheduleScreen
           rx={rx}
