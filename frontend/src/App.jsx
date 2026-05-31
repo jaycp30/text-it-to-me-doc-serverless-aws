@@ -496,6 +496,14 @@ function getStoredUserId() {
   }
 }
 
+function getStoredSessionToken() {
+  try { return localStorage.getItem('rxreader.sessionToken') || null; } catch { return null; }
+}
+
+function storeSessionToken(token) {
+  try { if (token) localStorage.setItem('rxreader.sessionToken', token); } catch { /* ignore */ }
+}
+
 function getStoredReminderDetails() {
   const fallback = {
     userId: getStoredUserId(),
@@ -927,6 +935,57 @@ function Sidebar({ screen, tab, setTab, onNewRx, onChat }) {
 }
 
 /* ─────────────────────────────────────────────────────────────────────────────
+   INVALID LINK SCREEN
+   Shown when an old-style ?session=userId magic link arrives. Those links
+   pre-date signed tokens and cannot be verified.
+───────────────────────────────────────────────────────────────────────────── */
+function InvalidLinkScreen({ onNewUpload }) {
+  return (
+    <div style={{ padding: '24px 20px 40px' }}>
+      <div
+        className="glass anim-fade-up"
+        style={{
+          borderRadius: 'var(--r-xl)',
+          padding: '28px 24px',
+          border: '1px solid rgba(155,142,196,0.28)',
+          background: 'var(--lav-lt)',
+        }}
+      >
+        <div className="icon-well" style={{
+          width: 56, height: 56, borderRadius: 'var(--r-lg)',
+          background: 'rgba(155,142,196,0.18)', color: 'var(--lav)',
+          marginBottom: 18,
+        }}><Icon name="alert" size={27} strokeWidth={2} /></div>
+
+        <p style={{
+          fontFamily: 'var(--font-head)', fontWeight: 700,
+          fontSize: 21, color: 'var(--text)', marginBottom: 10,
+        }}>
+          This link has expired
+        </p>
+        <p style={{ fontSize: 14, color: 'var(--text2)', lineHeight: 1.7, marginBottom: 20 }}>
+          This email link is no longer valid. Reminder links are now signed for security and expire after 90 days.
+          Check your inbox for a more recent reminder email, or upload a new prescription to get a fresh link.
+        </p>
+
+        <button
+          onClick={onNewUpload}
+          style={{
+            width: '100%', padding: '14px', borderRadius: 'var(--r-full)',
+            background: 'var(--sage)', color: '#fff',
+            fontFamily: 'var(--font-head)', fontWeight: 600, fontSize: 15,
+            display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8,
+            boxShadow: 'var(--sh-btn-sage)',
+          }}
+        >
+          <Icon name="camera" size={18} strokeWidth={2} /> Upload a new prescription
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/* ─────────────────────────────────────────────────────────────────────────────
    HOME SCREEN
 ───────────────────────────────────────────────────────────────────────────── */
 function HomeScreen({ onUpload }) {
@@ -1113,13 +1172,17 @@ function HomeScreen({ onUpload }) {
       setFormError('Cancel reminders needs the deployed backend API.');
       return;
     }
+    const token = getStoredSessionToken();
+    if (!token) {
+      setFormError('No active session found. Please re-upload your prescription first.');
+      return;
+    }
     setCancelLoading(true);
     setCancelStatus('');
     setFormError('');
     try {
-      const res = await fetch(`${API_BASE}/reminders/${encodeURIComponent(reminderDetails.userId)}`, {
-        method: 'DELETE',
-      });
+      const url = `${API_BASE}/reminders/${encodeURIComponent(reminderDetails.userId)}?token=${encodeURIComponent(token)}`;
+      const res = await fetch(url, { method: 'DELETE' });
       const payload = await res.json();
       if (!res.ok) throw new Error(errorFromPayload(payload, 'Could not cancel reminders'));
       setCancelStatus(payload.message || 'Reminders cancelled.');
@@ -2741,7 +2804,7 @@ function ChatDrawer({ open, onClose, rx, isDesktop = false }) {
    ROOT APP
 ───────────────────────────────────────────────────────────────────────────── */
 export default function App() {
-  const [screen, setScreen] = useState('home');    // 'home' | 'processing' | 'schedule' | 'error' | 'cancelled'
+  const [screen, setScreen] = useState('home');    // 'home' | 'processing' | 'schedule' | 'error' | 'cancelled' | 'invalidLink'
   const [rx,     setRx]     = useState(null);
   const [cancelledSchedule, setCancelledSchedule] = useState(null);
   const [processingError, setProcessingError] = useState('');
@@ -2753,49 +2816,59 @@ export default function App() {
   const [restoring, setRestoring] = useState(false);
   const isDesktop = useIsDesktop();
 
-  // Handle ?unsubscribe=userId arriving from email footer link
+  // Handle ?unsubscribe=userId&token=T arriving from email footer link
   useEffect(() => {
-    const params  = new URLSearchParams(window.location.search);
-    const userId  = params.get('unsubscribe');
+    const params = new URLSearchParams(window.location.search);
+    const userId = params.get('unsubscribe');
     if (!userId || !API_BASE) return;
 
     // Clean the URL immediately so a refresh doesn't re-trigger
     window.history.replaceState({}, '', window.location.pathname);
 
+    const token = params.get('token') || getStoredSessionToken();
+    const url = token
+      ? `${API_BASE}/reminders/${encodeURIComponent(userId)}?token=${encodeURIComponent(token)}`
+      : `${API_BASE}/reminders/${encodeURIComponent(userId)}`;
+
     setUnsubscribeBanner('loading');
-    fetch(`${API_BASE}/reminders/${encodeURIComponent(userId)}`, { method: 'DELETE' })
+    fetch(url, { method: 'DELETE' })
       .then(res => res.json())
       .then(() => setUnsubscribeBanner('done'))
       .catch(() => setUnsubscribeBanner('error'));
   }, []);
 
   // Restore an existing session on load:
-  //   A) same browser  — userId already in localStorage
-  //   B) any device     — ?session=userId magic link from an email
-  // Rehydrates the prescription from GET /schedules so chat + timetable work
-  // again without re-uploading and without any login.
+  //   A) same browser  — signed session token in localStorage (stored after upload)
+  //   B) any device    — ?token=<signed> magic link from a recent email
+  //   C) old-style     — ?session=userId link (pre-signed-token emails) → expired screen
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     if (params.get('unsubscribe')) return;   // handled by the effect above
     if (!API_BASE) return;
 
-    const sessionUserId = params.get('session');
-    if (sessionUserId) {
-      // Adopt the userId from the magic link, then clean the URL.
-      try { localStorage.setItem('rxreader.userId', sessionUserId); } catch { /* ignore */ }
+    // Old-style ?session=userId links (pre-dating signed tokens): show expired screen.
+    const legacyUserId = params.get('session');
+    if (legacyUserId) {
+      window.history.replaceState({}, '', window.location.pathname);
+      setScreen('invalidLink');
+      return;
+    }
+
+    // New signed token from URL (?token=<signed>)
+    const urlToken = params.get('token');
+    if (urlToken) {
+      storeSessionToken(urlToken);
       window.history.replaceState({}, '', window.location.pathname);
     }
 
-    let userId = sessionUserId;
-    if (!userId) {
-      try { userId = localStorage.getItem('rxreader.userId'); } catch { userId = null; }
-    }
-    if (!userId) return;
+    const token = urlToken || getStoredSessionToken();
+    if (!token) return;
 
     setRestoring(true);
-    fetch(`${API_BASE}/schedules?userId=${encodeURIComponent(userId)}&includeInactive=true`)
+    fetch(`${API_BASE}/schedules?token=${encodeURIComponent(token)}&includeInactive=true`)
       .then(res => res.json())
       .then(data => {
+        if (data.error) return; // 401 invalid token — stay on home screen silently
         const schedules = (data.schedules || []).filter(s => (s.medications || []).length > 0);
         if (schedules.length === 0) return;
 
@@ -2937,6 +3010,7 @@ export default function App() {
         const processPayload = await procRes.json();
         if (!procRes.ok) throw new Error(errorFromPayload(processPayload, 'Could not process prescription'));
         setProcessingStage('finishing');
+        if (processPayload.sessionToken) storeSessionToken(processPayload.sessionToken);
         parsed = normalizePrescriptionResponse(processPayload);
 
         // NOTE: the subscription confirmation email is now sent server-side by
@@ -2981,10 +3055,11 @@ export default function App() {
   // Screen content — shared between the mobile and desktop shells
   const screenContent = (
     <>
-      {screen === 'home'       && <HomeScreen onUpload={handleUpload} />}
-      {screen === 'processing' && <ProcessingScreen stage={processingStage} startedAt={processingStartedAt} />}
-      {screen === 'error'      && <ProcessingErrorScreen error={processingError} onTryAgain={handleBack} />}
-      {screen === 'cancelled'  && <CancelledScheduleScreen schedule={cancelledSchedule} onNewUpload={handleBack} />}
+      {screen === 'home'        && <HomeScreen onUpload={handleUpload} />}
+      {screen === 'processing'  && <ProcessingScreen stage={processingStage} startedAt={processingStartedAt} />}
+      {screen === 'error'       && <ProcessingErrorScreen error={processingError} onTryAgain={handleBack} />}
+      {screen === 'cancelled'   && <CancelledScheduleScreen schedule={cancelledSchedule} onNewUpload={handleBack} />}
+      {screen === 'invalidLink' && <InvalidLinkScreen onNewUpload={handleBack} />}
       {screen === 'schedule'   && (
         <ScheduleScreen
           rx={rx}

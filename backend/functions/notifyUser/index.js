@@ -12,15 +12,40 @@
 
 const { SNSClient, PublishCommand } = require("@aws-sdk/client-sns");
 const { SESClient, SendEmailCommand } = require("@aws-sdk/client-ses");
-const { randomUUID } = require("crypto");
+const { createHmac, randomUUID } = require("crypto");
 
 const sns = new SNSClient({});
 const ses = new SESClient({});
 
-const SES_FROM_EMAIL = process.env.SES_FROM_EMAIL || "noreply@rxreader.app";
-const APP_URL        = process.env.APP_URL        || "https://main.d3bj6u7583ielg.amplifyapp.com";
+const SES_FROM_EMAIL       = process.env.SES_FROM_EMAIL       || "noreply@rxreader.app";
+const APP_URL              = process.env.APP_URL              || "https://main.d3bj6u7583ielg.amplifyapp.com";
 const TURNSTILE_SECRET_KEY = process.env.TURNSTILE_SECRET_KEY || "";
+const MAGIC_LINK_SECRET    = process.env.MAGIC_LINK_SECRET    || "";
 const TURNSTILE_VERIFY_URL = "https://challenges.cloudflare.com/turnstile/v0/siteverify";
+
+const TOKEN_TTL_SECONDS = 90 * 24 * 60 * 60; // 90 days
+
+function signSessionToken(userId) {
+  if (!MAGIC_LINK_SECRET || !userId) return null;
+  const exp = Math.floor(Date.now() / 1000) + TOKEN_TTL_SECONDS;
+  const payload = Buffer.from(JSON.stringify({ uid: userId, exp })).toString("base64url");
+  const sig = createHmac("sha256", MAGIC_LINK_SECRET).update(payload).digest("base64url");
+  return `${payload}.${sig}`;
+}
+
+function buildSessionUrl(userId) {
+  if (!userId) return APP_URL;
+  const token = signSessionToken(userId);
+  return token ? `${APP_URL}/?token=${encodeURIComponent(token)}` : APP_URL;
+}
+
+function buildUnsubscribeUrl(userId) {
+  if (!userId) return null;
+  const token = signSessionToken(userId);
+  return token
+    ? `${APP_URL}/?unsubscribe=${encodeURIComponent(userId)}&token=${encodeURIComponent(token)}`
+    : `${APP_URL}/?unsubscribe=${encodeURIComponent(userId)}`;
+}
 
 const RESPONSE_HEADERS = {
   "Content-Type": "application/json",
@@ -142,12 +167,8 @@ function formatSubscribedMessage({ medications = [], dosesScheduled = 0, userTim
 function buildHtmlEmail({ type, bodyText, dose, doses, medications, dosesScheduled, userTimezone, userId }) {
   // ── Inner content varies by message type ──────────────────────────────────
 
-  // Magic re-entry link: opens the app and restores this user's prescription +
-  // chat without any login (no-auth session restore). The userId is the bearer
-  // credential — acceptable for this no-login app; HMAC-sign later to harden.
-  const sessionUrl = userId
-    ? `${APP_URL}/?session=${encodeURIComponent(userId)}`
-    : APP_URL;
+  const sessionUrl     = buildSessionUrl(userId);
+  const unsubscribeUrl = buildUnsubscribeUrl(userId);
 
   let bodyContent;
 
@@ -290,8 +311,8 @@ function buildHtmlEmail({ type, bodyText, dose, doses, medications, dosesSchedul
               <p style="margin:0 0 6px;font-size:12px;color:#aaa;line-height:1.6;">
                 This is an automated medication reminder from RxReader. Do not reply to this email.
               </p>
-              ${userId ? `<p style="margin:0;font-size:12px;line-height:1.6;">
-                <a href="${APP_URL}/?unsubscribe=${encodeURIComponent(userId)}" style="color:#2d6a4f;text-decoration:underline;">Unsubscribe</a>
+              ${unsubscribeUrl ? `<p style="margin:0;font-size:12px;line-height:1.6;">
+                <a href="${unsubscribeUrl}" style="color:#2d6a4f;text-decoration:underline;">Unsubscribe</a>
                 <span style="color:#ccc;"> &middot; </span>
                 <a href="${sessionUrl}" style="color:#aaa;text-decoration:none;">Open my schedule</a>
               </p>` : ""}

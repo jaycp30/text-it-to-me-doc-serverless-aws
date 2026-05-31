@@ -3,7 +3,7 @@
 /**
  * cancelReminders/index.js
  *
- * DELETE /reminders/{userId}
+ * DELETE /reminders/{userId}?token=<signed-session-token>
  *
  * Cancels all upcoming EventBridge Scheduler rules for a user and marks
  * their DynamoDB schedule records as inactive. Used for opt-out.
@@ -12,24 +12,53 @@
 const { DynamoDBClient } = require("@aws-sdk/client-dynamodb");
 const { DynamoDBDocumentClient, QueryCommand, UpdateCommand } = require("@aws-sdk/lib-dynamodb");
 const { SchedulerClient, DeleteScheduleCommand } = require("@aws-sdk/client-scheduler");
+const { createHmac } = require("crypto");
 
 const dynamo    = DynamoDBDocumentClient.from(new DynamoDBClient({}));
 const scheduler = new SchedulerClient({});
 
-const SCHEDULES_TABLE  = process.env.SCHEDULES_TABLE;
-const SCHEDULER_GROUP  = process.env.SCHEDULER_GROUP;
+const SCHEDULES_TABLE   = process.env.SCHEDULES_TABLE;
+const SCHEDULER_GROUP   = process.env.SCHEDULER_GROUP;
+const MAGIC_LINK_SECRET = process.env.MAGIC_LINK_SECRET || "";
 
 const HEADERS = {
   "Content-Type": "application/json",
   "Access-Control-Allow-Origin": "*",
 };
 
+function verifySessionToken(token) {
+  if (!MAGIC_LINK_SECRET || !token) return null;
+  const parts = String(token).split(".");
+  if (parts.length !== 2) return null;
+  const [payload, sig] = parts;
+  const expected = createHmac("sha256", MAGIC_LINK_SECRET).update(payload).digest("base64url");
+  if (sig !== expected) return null;
+  try {
+    const data = JSON.parse(Buffer.from(payload, "base64url").toString());
+    if (!data.uid || !data.exp) return null;
+    if (Math.floor(Date.now() / 1000) > data.exp) return null;
+    return data.uid;
+  } catch {
+    return null;
+  }
+}
+
 module.exports.handler = async (event) => {
   try {
     const userId = event.pathParameters?.userId;
+    const token  = event.queryStringParameters?.token;
 
     if (!userId) {
       return { statusCode: 400, headers: HEADERS, body: JSON.stringify({ error: "userId required" }) };
+    }
+
+    const tokenUserId = verifySessionToken(token);
+    if (!tokenUserId || tokenUserId !== userId) {
+      return {
+        statusCode: 401,
+        headers: HEADERS,
+        body: JSON.stringify({ error: "Invalid or expired session token. Please use a recent email link." }),
+      };
     }
 
     // 1. Find all active schedule records for this user

@@ -20,7 +20,7 @@ const { S3Client, GetObjectCommand } = require("@aws-sdk/client-s3");
 const { SchedulerClient, CreateScheduleCommand } = require("@aws-sdk/client-scheduler");
 const { LambdaClient, InvokeCommand } = require("@aws-sdk/client-lambda");
 const { DateTime } = require("luxon");
-const { createHash, randomUUID } = require("crypto");
+const { createHash, createHmac, randomUUID } = require("crypto");
 
 const MAX_IMAGES = 5;
 const BEDROCK_IMAGE_TYPES = new Set(["image/jpeg", "image/png", "image/webp"]);
@@ -46,7 +46,20 @@ const {
   SCHEDULER_GROUP,
   NOTIFIER_FUNCTION_ARN,
   SCHEDULER_ROLE_ARN,
+  MAGIC_LINK_SECRET,
 } = process.env;
+
+// ─── Session token signing ────────────────────────────────────────────────────
+
+const TOKEN_TTL_SECONDS = 90 * 24 * 60 * 60; // 90 days
+
+function signSessionToken(userId) {
+  if (!MAGIC_LINK_SECRET) return null;
+  const exp = Math.floor(Date.now() / 1000) + TOKEN_TTL_SECONDS;
+  const payload = Buffer.from(JSON.stringify({ uid: userId, exp })).toString("base64url");
+  const sig = createHmac("sha256", MAGIC_LINK_SECRET).update(payload).digest("base64url");
+  return `${payload}.${sig}`;
+}
 
 // ─── System prompt ────────────────────────────────────────────────────────────
 // This is the most important part — it tells Claude exactly what to extract
@@ -361,6 +374,7 @@ function responseFromCompletedSchedule(schedule, headers, replay = false) {
   const medications = schedule.prescription?.medications || schedule.medications || [];
   const scheduledDoses = schedule.scheduledDoses || [];
   const skippedDoses = schedule.skippedDoses || [];
+  const sessionToken = schedule.userId ? signSessionToken(schedule.userId) : null;
 
   return {
     statusCode: 200,
@@ -369,6 +383,8 @@ function responseFromCompletedSchedule(schedule, headers, replay = false) {
       idempotentReplay: replay,
       prescriptionId: schedule.prescriptionId,
       scheduleId: schedule.scheduleId,
+      sessionToken,
+      ...(replay ? { samePrescriptionId: true, sameScheduleId: true } : {}),
       prescription: schedule.prescription || { medications },
       summary: {
         medicationsFound: medications.length,
@@ -684,6 +700,7 @@ module.exports.handler = async (event) => {
 
     // ── Step 6: Respond to frontend ───────────────────────────────────────
     return responseFromCompletedSchedule({
+      userId,
       prescriptionId,
       scheduleId,
       prescription,

@@ -46,6 +46,12 @@ Parameters:
     Description: Cloudflare Turnstile secret key used to protect the public /notify-test endpoint
     Default: ""
 
+  MagicLinkSecret:
+    Type: String
+    NoEcho: true
+    Description: Secret used to HMAC-sign session tokens embedded in email magic links. Must be at least 32 random characters.
+    Default: ""
+
 # ─── Resources ──────────────────────────────────────────────────────────────
 Resources:
 
@@ -215,6 +221,7 @@ Resources:
         Variables:
           NOTIFIER_FUNCTION_ARN: !GetAtt NotifyUserFunction.Arn
           SCHEDULER_ROLE_ARN:    !GetAtt SchedulerRole.Arn
+          MAGIC_LINK_SECRET:     !Ref MagicLinkSecret
       Policies:
         - S3ReadPolicy:
             BucketName: !Ref ImagesBucket
@@ -274,8 +281,9 @@ Resources:
               Resource: "*"
       Environment:
         Variables:
-          SES_FROM_EMAIL: !Ref SesFromEmail
+          SES_FROM_EMAIL:       !Ref SesFromEmail
           TURNSTILE_SECRET_KEY: !Ref TurnstileSecretKey
+          MAGIC_LINK_SECRET:    !Ref MagicLinkSecret
       Events:
         TestNotification:
           Type: HttpApi
@@ -329,6 +337,9 @@ Resources:
       FunctionName: rx-cancel-reminders
       Handler: index.handler
       CodeUri: backend/functions/cancelReminders/
+      Environment:
+        Variables:
+          MAGIC_LINK_SECRET: !Ref MagicLinkSecret
       Policies:
         - DynamoDBReadPolicy:
             TableName: !Ref SchedulesTable
@@ -355,6 +366,9 @@ Resources:
       FunctionName: rx-get-schedules
       Handler: index.handler
       CodeUri: backend/functions/getSchedules/
+      Environment:
+        Variables:
+          MAGIC_LINK_SECRET: !Ref MagicLinkSecret
       Policies:
         - DynamoDBReadPolicy:
             TableName: !Ref SchedulesTable
