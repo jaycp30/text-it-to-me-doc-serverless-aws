@@ -1146,7 +1146,7 @@ function HomeScreen({ onUpload }) {
                 Reminder details
               </p>
               <p style={{ fontSize: 12, color: 'var(--text2)', marginTop: 1 }}>
-                Used to schedule notifications after the prescription is read.
+                Confirm your contact details below, then click <strong>Read</strong> to extract your prescription and activate reminders.
               </p>
             </div>
           </div>
@@ -1273,6 +1273,37 @@ function HomeScreen({ onUpload }) {
             <p style={{ color: 'var(--danger)', fontSize: 12, marginTop: 10, lineHeight: 1.45 }}>
               {formError}
             </p>
+          )}
+        </div>
+      )}
+
+      {/* Contextual hint — tells user what clicking Read will do */}
+      {files.length > 0 && (
+        <div style={{
+          display: 'flex', alignItems: 'center', gap: 8,
+          padding: '10px 14px', borderRadius: 'var(--r-lg)', marginBottom: 10,
+          background: reminderDetails.contactInfo
+            ? 'var(--sage-lt)'
+            : 'rgba(255,255,255,0.04)',
+          border: reminderDetails.contactInfo
+            ? '1px solid rgba(87,153,112,0.25)'
+            : '1px dashed rgba(255,255,255,0.1)',
+        }}>
+          {reminderDetails.contactInfo ? (
+            <>
+              <Icon name="check-circle" size={15} strokeWidth={2} style={{ color: 'var(--sage)', flexShrink: 0 }} />
+              <p style={{ fontSize: 12, color: 'var(--sage)', fontWeight: 600, margin: 0, lineHeight: 1.4 }}>
+                {reminderDetails.notificationMethod === 'sms' ? 'SMS' : 'Email'} reminders will be sent to{' '}
+                <span style={{ fontWeight: 700 }}>{reminderDetails.contactInfo}</span> — click <strong>Read</strong> to begin.
+              </p>
+            </>
+          ) : (
+            <>
+              <Icon name="info" size={15} strokeWidth={2} style={{ color: 'var(--text3)', flexShrink: 0 }} />
+              <p style={{ fontSize: 12, color: 'var(--text3)', margin: 0, lineHeight: 1.4 }}>
+                Add your email or phone above to receive reminders after reading.
+              </p>
+            </>
           )}
         </div>
       )}
@@ -2465,7 +2496,24 @@ export default function App() {
   const [processingError, setProcessingError] = useState('');
   const [chatOpen, setChatOpen] = useState(false);
   const [tab,    setTab]    = useState('today');    // schedule tab, lifted so sidebar can drive it
+  const [unsubscribeBanner, setUnsubscribeBanner] = useState(null); // null | 'loading' | 'done' | 'error'
   const isDesktop = useIsDesktop();
+
+  // Handle ?unsubscribe=userId arriving from email footer link
+  useEffect(() => {
+    const params  = new URLSearchParams(window.location.search);
+    const userId  = params.get('unsubscribe');
+    if (!userId || !API_BASE) return;
+
+    // Clean the URL immediately so a refresh doesn't re-trigger
+    window.history.replaceState({}, '', window.location.pathname);
+
+    setUnsubscribeBanner('loading');
+    fetch(`${API_BASE}/reminders/${encodeURIComponent(userId)}`, { method: 'DELETE' })
+      .then(res => res.json())
+      .then(() => setUnsubscribeBanner('done'))
+      .catch(() => setUnsubscribeBanner('error'));
+  }, []);
 
   async function handleUpload(filesOrFile, reminderDetails = getStoredReminderDetails()) {
     const files = Array.isArray(filesOrFile) ? filesOrFile : filesOrFile ? [filesOrFile] : [];
@@ -2569,6 +2617,25 @@ export default function App() {
         if (!procRes.ok) throw new Error(errorFromPayload(processPayload, 'Could not process prescription'));
         parsed = normalizePrescriptionResponse(processPayload);
 
+        // Fire-and-forget subscription confirmation email.
+        // Gives the user immediate proof that reminders are set up, before the
+        // first dose reminder or daily summary arrives.
+        if (uploadContext.notificationMethod === 'email' && uploadContext.contactInfo) {
+          fetch(`${API_BASE}/notify-test`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              type: 'subscribed',
+              userId: uploadContext.userId,
+              notificationMethod: 'email',
+              contactInfo: uploadContext.contactInfo,
+              medications: processPayload.prescription?.medications || [],
+              dosesScheduled: processPayload.summary?.dosesScheduled || 0,
+              userTimezone: uploadContext.userTimezone,
+            }),
+          }).catch(err => console.warn('Subscription confirmation email failed silently:', err));
+        }
+
       } else {
         // No key and no backend — fall back to mock
         parsed = MOCK_RX;
@@ -2617,11 +2684,35 @@ export default function App() {
     </>
   );
 
+  const UnsubscribeBanner = unsubscribeBanner && (
+    <div style={{
+      position: 'fixed', top: 0, left: 0, right: 0, zIndex: 9999,
+      background: unsubscribeBanner === 'done'    ? '#2d6a4f'
+               : unsubscribeBanner === 'error'   ? '#b85450'
+               : '#555',
+      color: '#fff', fontSize: 14, fontWeight: 600,
+      padding: '14px 24px', textAlign: 'center',
+      display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 12,
+    }}>
+      {unsubscribeBanner === 'loading' && 'Cancelling your reminders…'}
+      {unsubscribeBanner === 'done'    && '✓ You have been unsubscribed. No more reminders will be sent.'}
+      {unsubscribeBanner === 'error'   && 'Could not unsubscribe. Please use the Stop reminders button in the app.'}
+      {unsubscribeBanner !== 'loading' && (
+        <button onClick={() => setUnsubscribeBanner(null)}
+          style={{ background: 'rgba(255,255,255,0.2)', border: 'none', color: '#fff',
+                   borderRadius: 6, padding: '2px 10px', cursor: 'pointer', fontSize: 13 }}>
+          ✕
+        </button>
+      )}
+    </div>
+  );
+
   /* ── Desktop: sidebar + centered main + right-docked chat ── */
   if (isDesktop) {
     return (
       <>
         <GlobalStyles />
+        {UnsubscribeBanner}
         <div className="app-shell">
           <Sidebar
             screen={screen}
@@ -2651,6 +2742,7 @@ export default function App() {
   return (
     <>
       <GlobalStyles />
+      {UnsubscribeBanner}
 
       <NavBar screen={screen} onBack={handleBack} />
 
