@@ -1,6 +1,6 @@
 # Text it To Me Doc — Serverless Prescription Reader
 
-A medication-reminder app hosted as a Vite/React static site on AWS Amplify, with an AWS SAM (Lambda + API Gateway) backend that reads handwritten prescriptions through Amazon Bedrock, builds a dose schedule, and sends reminders by SMS and email.
+A medication-reminder app hosted as a Vite/React static site on AWS Amplify, with an AWS SAM (Lambda + API Gateway) backend that uses **Claude Vision** (via Amazon Bedrock) to read handwritten prescription images, builds a dose schedule, and sends reminders by SMS and email.
 
 ## Project Structure
 
@@ -96,7 +96,7 @@ There is no public S3 URL for any prescription image. The only way to read an im
 
 The application uses Anthropic's **Claude Sonnet 4.6**, accessed through Amazon Bedrock (`jp.anthropic.claude-sonnet-4-6`, a Japan-resident inference profile), for two distinct jobs:
 
-- **Prescription reading (vision).** `ProcessPrescription` sends the prescription image to the model with a strict extraction prompt. The model expands shorthand (`bid`, `tid`, `pc`, `q6h`, ditto marks, tapers) into explicit per-dose dates and times and returns JSON only.
+- **Prescription reading (Claude Vision).** `ProcessPrescription` fetches the prescription image(s) from S3 and sends them as base64-encoded image blocks directly to the Claude model — no separate OCR step. Claude reads the raw image and expands shorthand (`bid`, `tid`, `pc`, `q6h`, ditto marks, tapers) into explicit per-dose dates and times, returning structured JSON only. Up to 5 pages can be sent in one request for multi-page prescriptions.
 - **Medication chat (text).** `Chat` answers questions grounded in the current prescription. The system prompt forbids dose changes, diagnosis, and off-topic answers, and redirects emergencies to call emergency services.
 
 A single SAM parameter, `BedrockModelId`, sets the model for both functions, so the model must be **vision-capable**. The `jp.` profile keeps inference within Japan, which is preferable to the `global.` profile for medical images.
