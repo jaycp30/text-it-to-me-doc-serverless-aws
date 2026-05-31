@@ -20,7 +20,7 @@ Globals:
         BEDROCK_MODEL_ID:     !Ref BedrockModelId
         SCHEDULER_GROUP:      rx-medication-reminders
         SNS_TOPIC_ARN:        !Ref NotificationTopic
-        APP_URL:              "https://main.d3bj6u7583ielg.amplifyapp.com"
+        APP_URL:              !Ref AppUrl
         # NOTIFIER_FUNCTION_ARN and SCHEDULER_ROLE_ARN are set per-function
         # (not here) to avoid a circular dependency on NotifyUserFunction.
 
@@ -52,6 +52,14 @@ Parameters:
     Description: Secret used to HMAC-sign session tokens embedded in email magic links. Must be at least 32 random characters.
     Default: ""
 
+  AppUrl:
+    Type: String
+    Description: >
+      Public URL of the frontend (Amplify URL or custom domain, no trailing slash).
+      Used in email magic links and CORS rules. Override with your real URL at deploy time.
+      Example: https://textit2medoc.jaycloud.net
+    Default: "https://localhost:5173"
+
 # ─── Resources ──────────────────────────────────────────────────────────────
 Resources:
 
@@ -70,8 +78,8 @@ Resources:
         CorsRules:
           - AllowedHeaders: ["*"]
             AllowedMethods: [GET, PUT]
-            # Tighten this to your Amplify URL after first deploy
-            AllowedOrigins: ["https://main.d3bj6u7583ielg.amplifyapp.com"]
+            AllowedOrigins:
+              - !Ref AppUrl
             MaxAge: 3600
       LifecycleConfiguration:
         Rules:
@@ -179,7 +187,7 @@ Resources:
           ThrottlingRateLimit: 1
       CorsConfiguration:
         AllowOrigins:
-          - "https://main.d3bj6u7583ielg.amplifyapp.com"  # tighten to your Amplify URL after first deploy
+          - !Ref AppUrl
         AllowMethods:
           - GET
           - POST

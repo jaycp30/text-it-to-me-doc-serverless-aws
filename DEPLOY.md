@@ -413,9 +413,19 @@ sam deploy --guided \
   --parameter-overrides \
     "BedrockModelId=apac.anthropic.claude-3-5-sonnet-20241022-v2:0" \
     "SesFromEmail=you@yourdomain.com" \
-    "TurnstileSecretKey=<cloudflare-turnstile-secret>"
+    "TurnstileSecretKey=<cloudflare-turnstile-secret>" \
+    "MagicLinkSecret=<32-char-random-secret>" \
+    "AppUrl=https://your-amplify-app.amplifyapp.com"
 ```
-Replace the `BedrockModelId` with the exact ID from Step 3b, `SesFromEmail` with your verified sender, and `TurnstileSecretKey` with the secret key from the Cloudflare Turnstile widget for this app.
+
+Replace each value:
+- `BedrockModelId` — the exact ID from Step 3b
+- `SesFromEmail` — your verified SES sender address
+- `TurnstileSecretKey` — Cloudflare Turnstile secret key (see [[Cloudflare Turnstile Setup|Cloudflare-Turnstile-Setup]] wiki)
+- `MagicLinkSecret` — generate with `openssl rand -base64 32` (see [[Security & Secrets|Security-and-Secrets]] wiki)
+- `AppUrl` — your Amplify URL from Step 6, or your custom domain if you've set one up (e.g. `https://textit2medoc.yourdomain.com`). This value is used in email magic links and CORS rules for both the API Gateway and S3 bucket — it must match the URL your browser actually opens the app from.
+
+> **If you haven't done Step 6 yet:** deploy with the default (`https://localhost:5173`) first, then redeploy with the real `AppUrl` once Amplify gives you a URL.
 
 > Note: `samconfig.toml` currently has `stack_name = "rx-reader"`. Using `--stack-name text-it-to-me-doc` above overrides it; or edit `samconfig.toml` to match. Either is fine — just be consistent on later deploys.
 
@@ -488,7 +498,13 @@ applications:
 
 4. Save & deploy. Amplify gives you a `https://main.<id>.amplifyapp.com` URL.
 
-5. **Tighten CORS** after you have the Amplify URL: in `template.yaml`, replace the two `AllowedOrigins/AllowOrigins: ["*"]` (the S3 bucket CORS and the `RxApi` CORS) with your Amplify URL, then `sam build && sam deploy`.
+5. **Set `AppUrl` and redeploy the backend** with the real Amplify URL (or custom domain if you've configured one):
+   ```bash
+   sam build && sam deploy --parameter-overrides \
+     "AppUrl=https://your-amplify-app.amplifyapp.com" \
+     # ... all other parameters unchanged
+   ```
+   This updates the API Gateway and S3 CORS rules and the email magic link base URL in one step.
 
 ---
 
