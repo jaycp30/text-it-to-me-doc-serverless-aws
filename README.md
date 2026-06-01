@@ -2,6 +2,10 @@
 
 A medication-reminder app hosted as a Vite/React static site on AWS Amplify, with an AWS SAM (Lambda + API Gateway) backend that uses **Claude Vision** (via Amazon Bedrock) to read handwritten prescription images, builds a dose schedule, and sends reminders by SMS and email.
 
+## Demo
+
+[![Text it To Me Doc — YouTube Demo](https://img.youtube.com/vi/01x1_VO18Bo/maxresdefault.jpg)](https://www.youtube.com/watch?v=01x1_VO18Bo)
+
 ## Project Structure
 
 ```text
