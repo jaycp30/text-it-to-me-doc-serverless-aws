@@ -38,6 +38,8 @@ text-it-to-me-doc-app/
 
 ![Architecture diagram](diagrams/architecture.png)
 
+> Diagram source: [`diagrams/architecture.drawio`](diagrams/architecture.drawio) — open in [draw.io](https://app.diagrams.net), edit, then re-export to `diagrams/architecture.png`.
+
 > Every box above (except Amplify) is defined as code in `template.yaml` and deployed as one unit via `sam deploy` — the deployed CloudFormation stack `text-it-to-me-doc` in `ap-northeast-1`.
 
 ## How The App Works
