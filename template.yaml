@@ -74,6 +74,13 @@ Resources:
         BlockPublicPolicy: true
         IgnorePublicAcls: true
         RestrictPublicBuckets: true
+      # Encrypt all objects at rest with SSE-S3 (AES-256). AWS applies this by
+      # default, but we declare it explicitly so the posture is auditable in IaC.
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+            BucketKeyEnabled: false
       CorsConfiguration:
         CorsRules:
           - AllowedHeaders: ["*"]
