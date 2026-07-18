@@ -1,0 +1,52 @@
+# Continuous Integration
+#
+# Runs the backend/frontend regression tests and the frontend production build
+# on every pull request and on pushes to main. Everything here is local and
+# deterministic — no AWS credentials, no network calls to AWS — matching the
+# "tests run in CI without real AWS calls" goal from issue #13.
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# Cancel an in-progress run when a newer commit is pushed to the same ref.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test-and-build:
+    name: Test & build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          # Cache is keyed off both lockfiles (root tests + frontend app).
+          cache-dependency-path: |
+            package-lock.json
+            frontend/package-lock.json
+
+      # Root workspace holds the Vitest regression tests (backend + frontend
+      # pure modules). npm ci installs exactly what package-lock.json pins.
+      - name: Install test dependencies (root)
+        run: npm ci
+
+      - name: Run tests
+        run: npm test
+
+      # The frontend is a separate npm project with its own lockfile.
+      - name: Install frontend dependencies
+        run: npm ci
+        working-directory: frontend
+
+      - name: Build frontend
+        run: npm run build
+        working-directory: frontend
