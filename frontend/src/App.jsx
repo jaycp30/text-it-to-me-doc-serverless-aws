@@ -1,5 +1,10 @@
 import React, { useState, useEffect, useRef } from 'react';
 import Icon from './Icons';
+import { ApiError, classifyError, resolveErrorCopy, UNKNOWN_CODE } from './errors';
+
+// Client-side ceiling for the /process request. API Gateway caps out around 29s,
+// so we abort a little past that and show a TIMEOUT rather than hang forever.
+const PROCESS_TIMEOUT_MS = 35000;
 
 /* ─────────────────────────────────────────────────────────────────────────────
    GLOBAL STYLES
@@ -1711,7 +1716,17 @@ function ProcessingScreen({ stage = 'preparing', startedAt }) {
   );
 }
 
-function ProcessingErrorScreen({ error, onTryAgain }) {
+function ProcessingErrorScreen({ failure, onTryAgain }) {
+  // `failure` is { code, requestId?, detail? }. Fall back to a generic code so
+  // an older/unknown error still renders something sensible.
+  const code = (failure && failure.code) || UNKNOWN_CODE;
+  const copy = resolveErrorCopy(code);
+  const requestId = failure && failure.requestId;
+  const detail = failure && failure.detail;
+
+  // A support/log-correlation reference: the code plus the Lambda request id.
+  const reference = [code, requestId].filter(Boolean).join(' · ');
+
   return (
     <div style={{ padding: '24px 20px 40px' }}>
       <div
@@ -1733,13 +1748,17 @@ function ProcessingErrorScreen({ error, onTryAgain }) {
           fontFamily: 'var(--font-head)', fontWeight: 700,
           fontSize: 20, color: 'var(--text)', marginBottom: 8,
         }}>
-          I couldn't read that prescription
+          {copy.title}
         </p>
-        <p style={{ fontSize: 14, color: 'var(--text2)', lineHeight: 1.65, marginBottom: 14 }}>
-          The app did not create a schedule from this upload. Try clearer screenshots, fewer pages, or check the backend logs if this keeps happening.
+        <p style={{ fontSize: 14, color: 'var(--text2)', lineHeight: 1.65, marginBottom: 8 }}>
+          {copy.body}
+        </p>
+        {/* Retry guidance is tailored per failure type. */}
+        <p style={{ fontSize: 14, color: 'var(--text)', fontWeight: 600, lineHeight: 1.6, marginBottom: 14 }}>
+          {copy.retry}
         </p>
 
-        {error && (
+        {reference && (
           <p style={{
             fontFamily: 'var(--font-mono)', fontSize: 12, lineHeight: 1.55,
             color: '#fff', background: 'rgba(124,34,48,0.72)',
@@ -1747,7 +1766,8 @@ function ProcessingErrorScreen({ error, onTryAgain }) {
             borderRadius: 'var(--r-md)', padding: '10px 12px', marginBottom: 16,
             wordBreak: 'break-word',
           }}>
-            {error}
+            <span style={{ opacity: 0.75 }}>Reference: </span>{reference}
+            {detail ? <><br />{detail}</> : null}
           </p>
         )}
 
@@ -2807,7 +2827,8 @@ export default function App() {
   const [screen, setScreen] = useState('home');    // 'home' | 'processing' | 'schedule' | 'error' | 'cancelled' | 'invalidLink'
   const [rx,     setRx]     = useState(null);
   const [cancelledSchedule, setCancelledSchedule] = useState(null);
-  const [processingError, setProcessingError] = useState('');
+  // { code, requestId?, detail? } — null when there is no active error.
+  const [processingError, setProcessingError] = useState(null);
   const [processingStage, setProcessingStage] = useState('preparing');
   const [processingStartedAt, setProcessingStartedAt] = useState(null);
   const [chatOpen, setChatOpen] = useState(false);
@@ -2915,7 +2936,7 @@ export default function App() {
     }
 
     setScreen('processing');
-    setProcessingError('');
+    setProcessingError(null);
     setProcessingStage('preparing');
     setProcessingStartedAt(Date.now());
 
@@ -2983,32 +3004,58 @@ export default function App() {
               contentType: getFileContentType(file),
             }),
           });
-          const urlPayload = await urlRes.json();
-          if (!urlRes.ok) throw new Error(errorFromPayload(urlPayload, 'Could not create upload URL'));
+          const urlPayload = await urlRes.json().catch(() => ({}));
+          if (!urlRes.ok) {
+            throw new ApiError(urlPayload.code, errorFromPayload(urlPayload, 'Could not create upload URL'), {
+              status: urlRes.status,
+              requestId: urlPayload.requestId,
+              detail: urlPayload.detail,
+            });
+          }
           const { uploadUrl, imageKey } = urlPayload;
 
           const putRes = await fetch(uploadUrl, {
             method: 'PUT', body: file,
             headers: { 'Content-Type': getFileContentType(file) },
           });
-          if (!putRes.ok) throw new Error(`Could not upload page ${index + 1}`);
+          if (!putRes.ok) {
+            throw new ApiError('UPLOAD_FAILED', `Could not upload page ${index + 1}`, {
+              status: putRes.status,
+              detail: `S3 PUT returned ${putRes.status} for page ${index + 1}`,
+            });
+          }
 
           return imageKey;
         }));
 
         setProcessingStage('reading');
-        const procRes = await fetch(`${API_BASE}/process`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            imageKey: uploaded[0],
-            imageKeys: uploaded,
-            uploadId,
-            ...uploadContext,
-          }),
-        });
-        const processPayload = await procRes.json();
-        if (!procRes.ok) throw new Error(errorFromPayload(processPayload, 'Could not process prescription'));
+        // Abort past the API Gateway ceiling so a slow read surfaces as TIMEOUT.
+        const procController = new AbortController();
+        const procTimeout = setTimeout(() => procController.abort(), PROCESS_TIMEOUT_MS);
+        let procRes;
+        try {
+          procRes = await fetch(`${API_BASE}/process`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              imageKey: uploaded[0],
+              imageKeys: uploaded,
+              uploadId,
+              ...uploadContext,
+            }),
+            signal: procController.signal,
+          });
+        } finally {
+          clearTimeout(procTimeout);
+        }
+        const processPayload = await procRes.json().catch(() => ({}));
+        if (!procRes.ok) {
+          throw new ApiError(processPayload.code, errorFromPayload(processPayload, 'Could not process prescription'), {
+            status: procRes.status,
+            requestId: processPayload.requestId,
+            detail: processPayload.detail,
+          });
+        }
         setProcessingStage('finishing');
         if (processPayload.sessionToken) storeSessionToken(processPayload.sessionToken);
         parsed = normalizePrescriptionResponse(processPayload);
@@ -3038,7 +3085,10 @@ export default function App() {
     } catch (err) {
       console.error('Prescription parse error:', err);
       setRx(null);
-      setProcessingError(err.message || 'Unexpected prescription processing error');
+      // Classify into a stable code (backend code, or a client-derived
+      // TIMEOUT/NETWORK_ERROR) so the error screen can tailor its guidance.
+      const { code, requestId, detail } = classifyError(err);
+      setProcessingError({ code, requestId, detail });
       setScreen('error');
     }
   }
@@ -3047,7 +3097,7 @@ export default function App() {
     setScreen('home');
     setRx(null);
     setCancelledSchedule(null);
-    setProcessingError('');
+    setProcessingError(null);
     setChatOpen(false);
     setTab('today');
   }
@@ -3057,7 +3107,7 @@ export default function App() {
     <>
       {screen === 'home'        && <HomeScreen onUpload={handleUpload} />}
       {screen === 'processing'  && <ProcessingScreen stage={processingStage} startedAt={processingStartedAt} />}
-      {screen === 'error'       && <ProcessingErrorScreen error={processingError} onTryAgain={handleBack} />}
+      {screen === 'error'       && <ProcessingErrorScreen failure={processingError} onTryAgain={handleBack} />}
       {screen === 'cancelled'   && <CancelledScheduleScreen schedule={cancelledSchedule} onNewUpload={handleBack} />}
       {screen === 'invalidLink' && <InvalidLinkScreen onNewUpload={handleBack} />}
       {screen === 'schedule'   && (

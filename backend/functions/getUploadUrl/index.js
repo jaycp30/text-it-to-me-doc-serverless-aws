@@ -40,18 +40,19 @@ function safeSegment(value) {
     .substring(0, 120);
 }
 
-module.exports.handler = async (event) => {
+module.exports.handler = async (event, context) => {
   const headers = {
     "Content-Type": "application/json",
     "Access-Control-Allow-Origin": "*",
   };
+  const requestId = context?.awsRequestId;
 
   try {
     const body = JSON.parse(event.body || "{}");
     const { userId, contentType, uploadId, pageNumber } = body;
 
     if (!userId) {
-      return { statusCode: 400, headers, body: JSON.stringify({ error: "userId required" }) };
+      return { statusCode: 400, headers, body: JSON.stringify({ error: "userId required", code: "MISSING_USER", requestId }) };
     }
 
     const fileType = String(contentType || "image/jpeg").toLowerCase() === "image/jpg"
@@ -60,9 +61,9 @@ module.exports.handler = async (event) => {
 
     if (!ALLOWED_CONTENT_TYPES.includes(fileType)) {
       return {
-        statusCode: 400,
+        statusCode: 415,
         headers,
-        body: JSON.stringify({ error: `Content type ${fileType} not allowed. Use JPEG, PNG, or WebP.` }),
+        body: JSON.stringify({ error: `That file type isn't supported. Use JPEG, PNG, or WebP.`, code: "UNSUPPORTED_FILE", detail: `Content type ${fileType} not allowed`, requestId }),
       };
     }
 
@@ -71,7 +72,7 @@ module.exports.handler = async (event) => {
       return {
         statusCode: 400,
         headers,
-        body: JSON.stringify({ error: `pageNumber must be between 1 and ${MAX_PAGE_NUMBER}` }),
+        body: JSON.stringify({ error: `pageNumber must be between 1 and ${MAX_PAGE_NUMBER}`, code: "INVALID_PAGE", requestId }),
       };
     }
 
@@ -103,7 +104,7 @@ module.exports.handler = async (event) => {
     return {
       statusCode: 500,
       headers,
-      body: JSON.stringify({ error: error.message }),
+      body: JSON.stringify({ error: "Could not prepare the upload. Please try again.", code: "UPLOAD_URL_FAILED", detail: error.message, requestId }),
     };
   }
 };

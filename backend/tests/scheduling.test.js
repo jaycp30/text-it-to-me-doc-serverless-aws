@@ -1,5 +1,5 @@
-import { describe, it, expect, beforeAll, afterAll } from "vitest";
-import { DateTime, Settings } from "luxon";
+import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
+import { DateTime } from "luxon";
 
 import {
   MAX_IMAGES,
@@ -11,27 +11,35 @@ import {
   buildDosesToSchedule,
   isDosePast,
   buildScheduleName,
+  isTotalScheduleFailure,
 } from "../functions/processPrescription/scheduling.js";
 
 // All time-dependent behavior is pinned to a fixed "now" so the tests are
 // deterministic. Asia/Manila (UTC+8, no DST) keeps the arithmetic simple.
+// 2026-07-18T12:00 Manila == 2026-07-18T04:00Z.
+//
+// We freeze via vi.setSystemTime (which patches the global Date that luxon's
+// default clock reads) rather than luxon's Settings.now — under Vitest the test
+// and scheduling.js can resolve to separate luxon module copies, so a
+// Settings.now set here would not reach the code under test.
 const TZ = "Asia/Manila";
 const FROZEN_NOW = DateTime.fromISO("2026-07-18T12:00:00", { zone: TZ });
 const TODAY = "2026-07-18";
 
 beforeAll(() => {
-  Settings.now = () => FROZEN_NOW.toMillis();
+  vi.useFakeTimers();
+  vi.setSystemTime(FROZEN_NOW.toJSDate());
 });
 
 afterAll(() => {
-  Settings.now = () => Date.now();
+  vi.useRealTimers();
 });
 
 describe("validateImageKeys — max image validation", () => {
   it("rejects a request with no image keys", () => {
     const { keys, error } = validateImageKeys({});
     expect(keys).toEqual([]);
-    expect(error).toEqual({ statusCode: 400, message: "imageKey or imageKeys is required" });
+    expect(error).toEqual({ statusCode: 400, code: "MISSING_IMAGES", message: "imageKey or imageKeys is required" });
   });
 
   it("rejects more than MAX_IMAGES keys", () => {
@@ -39,6 +47,7 @@ describe("validateImageKeys — max image validation", () => {
     const { error } = validateImageKeys({ imageKeys: tooMany });
     expect(error).toEqual({
       statusCode: 400,
+      code: "TOO_MANY_IMAGES",
       message: `A maximum of ${MAX_IMAGES} images can be processed at once`,
     });
   });
@@ -271,5 +280,24 @@ describe("buildScheduleName — 64-character EventBridge limit", () => {
   it("falls back to 'med' when the medication name is missing", () => {
     const name = buildScheduleName({ date: "2026-08-01", time: "08:00" }, "abcd1234");
     expect(name).toBe("rx-2026-08-01-0800-med-abcd1234");
+  });
+});
+
+describe("isTotalScheduleFailure — SCHEDULE_CREATE_FAILED trigger", () => {
+  it("is true when doses were attempted, none scheduled, and there were creation errors", () => {
+    expect(isTotalScheduleFailure(3, 0, 3)).toBe(true);
+    expect(isTotalScheduleFailure(3, 0, 1)).toBe(true);
+  });
+
+  it("is false when at least one dose was scheduled (partial success)", () => {
+    expect(isTotalScheduleFailure(3, 1, 2)).toBe(false);
+  });
+
+  it("is false when nothing scheduled but the misses were past-dose skips, not errors", () => {
+    expect(isTotalScheduleFailure(3, 0, 0)).toBe(false);
+  });
+
+  it("is false when there was nothing to schedule at all", () => {
+    expect(isTotalScheduleFailure(0, 0, 0)).toBe(false);
   });
 });
