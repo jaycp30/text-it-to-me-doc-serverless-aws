@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import Icon from './Icons';
 import { ApiError, classifyError, resolveErrorCopy, UNKNOWN_CODE } from './errors';
+import { deriveConfirmationStatus, canResend, cooldownRemainingMs, RESEND_COOLDOWN_MS } from './confirmation';
 
 // Client-side ceiling for the /process request. API Gateway caps out around 29s,
 // so we abort a little past that and show a TIMEOUT rather than hang forever.
@@ -642,6 +643,8 @@ function normalizePrescriptionResponse(payload) {
     prescriber: source.prescriber || source.doctor || null,
     medications,
     notes: source.notes || payload?.message || null,
+    // Subscription-confirmation status from the backend (email setups only).
+    confirmation: payload?.confirmation || null,
   };
 }
 
@@ -2240,6 +2243,162 @@ function UpcomingTab({ rx, scheduleStartDate }) {
 /* ─────────────────────────────────────────────────────────────────────────────
    SCHEDULE SCREEN
 ───────────────────────────────────────────────────────────────────────────── */
+/* ─────────────────────────────────────────────────────────────────────────────
+   CONFIRMATION BANNER (issue #10)
+   Shows whether the subscription confirmation email was sent, and offers a
+   resend over the hardened, Turnstile-gated /notify-test path. Self-contained
+   so it doesn't disturb the setup form's Turnstile widget in HomeScreen.
+───────────────────────────────────────────────────────────────────────────── */
+function ResendConfirmation({ userId, contact, method }) {
+  const turnstileRef = useRef(null);
+  const widgetRef = useRef(null);
+  const [token, setToken] = useState('');
+  const [ready, setReady] = useState(!TURNSTILE_SITE_KEY);
+  const [sending, setSending] = useState(false);
+  const [status, setStatus] = useState(null); // { ok, message }
+  const [lastSentAt, setLastSentAt] = useState(null);
+  const [nowTs, setNowTs] = useState(Date.now());
+
+  // Render this banner's own Turnstile widget (independent of HomeScreen's).
+  useEffect(() => {
+    if (!TURNSTILE_SITE_KEY || !turnstileRef.current) return undefined;
+    let cancelled = false;
+    loadTurnstileScript()
+      .then((turnstile) => {
+        if (cancelled || !turnstileRef.current || widgetRef.current) return;
+        widgetRef.current = turnstile.render(turnstileRef.current, {
+          sitekey: TURNSTILE_SITE_KEY,
+          theme: 'auto',
+          size: 'flexible',
+          action: 'notify-test',
+          callback: (t) => { setToken(t); setReady(true); },
+          'expired-callback': () => { setToken(''); setReady(false); },
+          'error-callback': () => { setToken(''); setReady(false); },
+        });
+      })
+      .catch(() => { if (!cancelled) setReady(false); });
+    return () => {
+      cancelled = true;
+      if (window.turnstile && widgetRef.current) {
+        window.turnstile.remove(widgetRef.current);
+        widgetRef.current = null;
+      }
+    };
+  }, []);
+
+  const cooling = !canResend(lastSentAt, nowTs);
+  const remainingSec = Math.ceil(cooldownRemainingMs(lastSentAt, nowTs) / 1000);
+
+  // Tick once a second while the cooldown counts down.
+  useEffect(() => {
+    if (!cooling) return undefined;
+    const id = setInterval(() => setNowTs(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, [cooling]);
+
+  const disabled = sending || !API_BASE || !TURNSTILE_SITE_KEY || !ready || cooling;
+
+  async function resend() {
+    if (disabled) return;
+    setSending(true);
+    setStatus(null);
+    try {
+      const res = await fetch(`${API_BASE}/notify-test`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ type: 'test', userId, notificationMethod: method, contactInfo: contact, turnstileToken: token }),
+      });
+      const payload = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new ApiError(payload.code, errorFromPayload(payload, 'Could not resend confirmation'), {
+          status: res.status, requestId: payload.requestId, detail: payload.detail,
+        });
+      }
+      setStatus({ ok: true, message: `Confirmation re-sent to ${contact}.` });
+      setLastSentAt(Date.now());
+    } catch (err) {
+      const { code } = classifyError(err);
+      setStatus({ ok: false, message: resolveErrorCopy(code).retry });
+    } finally {
+      setSending(false);
+      if (window.turnstile && widgetRef.current) window.turnstile.reset(widgetRef.current);
+      setToken('');
+      if (TURNSTILE_SITE_KEY) setReady(false);
+    }
+  }
+
+  const label = sending ? 'Resending…' : cooling ? `Resend available in ${remainingSec}s` : 'Resend confirmation email';
+
+  return (
+    <div style={{ marginTop: 12 }}>
+      {TURNSTILE_SITE_KEY && <div ref={turnstileRef} style={{ marginBottom: 10 }} />}
+      <button
+        onClick={resend}
+        disabled={disabled}
+        style={{
+          width: '100%', padding: '11px', borderRadius: 'var(--r-full)',
+          border: 'none', cursor: disabled ? 'default' : 'pointer',
+          background: disabled ? 'var(--bg3)' : 'var(--lav-lt)',
+          color: disabled ? 'var(--text3)' : 'var(--lav)',
+          fontFamily: 'var(--font-head)', fontWeight: 600, fontSize: 14,
+        }}
+      >
+        {label}
+      </button>
+      {!TURNSTILE_SITE_KEY && (
+        <p style={{ fontSize: 12, color: 'var(--text3)', marginTop: 8 }}>
+          Resend needs Cloudflare Turnstile configured for this deployment.
+        </p>
+      )}
+      {status && (
+        <p style={{ fontSize: 13, marginTop: 10, color: status.ok ? 'var(--sage)' : 'var(--danger)' }}>
+          {status.message}
+        </p>
+      )}
+    </div>
+  );
+}
+
+function ConfirmationBanner({ rx }) {
+  const details = getStoredReminderDetails();
+  const method = details.notificationMethod;
+  const status = deriveConfirmationStatus(rx?.confirmation, method);
+  if (!status) return null; // SMS setup, or no email method — nothing to show
+
+  const contact = (details.contactInfo || '').trim() || 'your email';
+
+  const headline = status.state === 'sent'
+    ? `Confirmation email sent to ${contact}`
+    : status.state === 'failed'
+      ? `We couldn't send your confirmation email to ${contact}`
+      : `A confirmation email is on its way to ${contact}`;
+
+  const isProblem = status.state === 'failed';
+
+  return (
+    <div
+      className="glass anim-fade-up"
+      style={{
+        margin: '16px 20px 0',
+        borderRadius: 'var(--r-lg)',
+        padding: '14px 16px',
+        border: `1px solid ${isProblem ? 'rgba(232,92,92,0.28)' : 'rgba(94,126,104,0.28)'}`,
+        background: isProblem ? 'var(--danger-lt)' : 'var(--bg2)',
+      }}
+    >
+      <p style={{ fontSize: 14, fontWeight: 600, color: 'var(--text)', marginBottom: 4 }}>
+        {isProblem ? '⚠ ' : '✉ '}{headline}
+      </p>
+      <p style={{ fontSize: 13, color: 'var(--text2)', lineHeight: 1.55 }}>
+        {isProblem
+          ? 'Please resend it below. Reminders are still active either way.'
+          : "Didn't get it? Check spam, or resend below."}
+      </p>
+      <ResendConfirmation userId={details.userId} contact={contact} method={method} />
+    </div>
+  );
+}
+
 function ScheduleScreen({ rx, tab, setTab, showTabBar = true }) {
   const [scheduleStartDate, setScheduleStartDate] = useState(() => defaultScheduleStartDate(rx));
   const [doses, setDoses] = useState(() => buildDosesForDate(rx, new Date(), defaultScheduleStartDate(rx)));
@@ -2268,6 +2427,9 @@ function ScheduleScreen({ rx, tab, setTab, showTabBar = true }) {
 
   return (
     <div style={{ paddingBottom: 110 }}>
+
+      {/* Confirmation email status + resend (email setups only) */}
+      <ConfirmationBanner rx={rx} />
 
       {/* Greeting / progress card */}
       <div
