@@ -31,7 +31,12 @@ const {
   doseToUtc,
   isDosePast,
   buildScheduleName,
+  isTotalScheduleFailure,
 } = require("./scheduling");
+
+// Stable error codes + response builder (see backend/tests/errors.test.js). The
+// frontend maps these codes to user-facing copy in frontend/src/errors.js.
+const { CODES, ProcessingError, errorResponse } = require("./errors");
 
 const BEDROCK_IMAGE_TYPES = new Set(["image/jpeg", "image/png", "image/webp"]);
 
@@ -145,7 +150,12 @@ async function getImageFromS3(imageKey) {
   const contentType = detectImageContentType(buffer, response.ContentType);
 
   if (!BEDROCK_IMAGE_TYPES.has(contentType)) {
-    throw new Error(`Unsupported image type ${contentType}. Please upload JPEG, PNG, or WebP images.`);
+    throw new ProcessingError(
+      CODES.UNSUPPORTED_FILE,
+      415,
+      "That file type isn't supported. Please upload JPEG, PNG, or WebP images.",
+      `Unsupported image type ${contentType}`,
+    );
   }
 
   return {
@@ -382,11 +392,15 @@ async function markScheduleFailed({ userId, scheduleId, message }) {
 }
 
 // ─── Handler ──────────────────────────────────────────────────────────────────
-module.exports.handler = async (event) => {
+module.exports.handler = async (event, context) => {
   const headers = {
     "Content-Type": "application/json",
     "Access-Control-Allow-Origin": "*",
   };
+
+  // Surfaced in error responses so a user can quote it to support and we can
+  // grep the exact invocation in CloudWatch.
+  const requestId = context?.awsRequestId;
 
   let lockedSchedule = null;
 
@@ -405,9 +419,9 @@ module.exports.handler = async (event) => {
 
     // ── Validation ────────────────────────────────────────────────────────
     const { keys, error: imageKeysError } = validateImageKeys({ imageKey, imageKeys });
-    if (imageKeysError) return { statusCode: imageKeysError.statusCode, headers, body: JSON.stringify({ error: imageKeysError.message }) };
-    if (!userId)    return { statusCode: 400, headers, body: JSON.stringify({ error: "userId is required" }) };
-    if (!contactInfo) return { statusCode: 400, headers, body: JSON.stringify({ error: "contactInfo (phone or email) is required" }) };
+    if (imageKeysError) return errorResponse({ headers, requestId, ...imageKeysError });
+    if (!userId)    return errorResponse({ headers, requestId, statusCode: 400, code: CODES.MISSING_USER, message: "userId is required" });
+    if (!contactInfo) return errorResponse({ headers, requestId, statusCode: 400, code: CODES.MISSING_CONTACT, message: "contactInfo (phone or email) is required" });
 
     const timezone = userTimezone || "Asia/Manila";
     const idempotencyKey = getIdempotencyKey({ uploadId, keys, userId });
@@ -451,22 +465,22 @@ module.exports.handler = async (event) => {
       }
 
       if (existing?.processingStatus === "failed") {
-        return {
-          statusCode: 409,
+        return errorResponse({
           headers,
-          body: JSON.stringify({
-            error: "This upload already failed. Please choose the prescription pages again to start a fresh upload.",
-          }),
-        };
+          requestId,
+          statusCode: 409,
+          code: CODES.PREVIOUS_UPLOAD_FAILED,
+          message: "This upload already failed. Please choose the prescription pages again to start a fresh upload.",
+        });
       }
 
-      return {
-        statusCode: 409,
+      return errorResponse({
         headers,
-        body: JSON.stringify({
-          error: "This prescription is already being processed. Please wait for the current request to finish.",
-        }),
-      };
+        requestId,
+        statusCode: 409,
+        code: CODES.DUPLICATE_IN_PROGRESS,
+        message: "This prescription is already being processed. Please wait for the current request to finish.",
+      });
     }
 
     // ── Step 1: Get image(s) from S3 ──────────────────────────────────────
@@ -485,14 +499,14 @@ module.exports.handler = async (event) => {
       console.error("Parse error:", parseError.message);
       console.error("Raw response was:", rawResponse);
       await markScheduleFailed({ userId, scheduleId, message: parseError.message });
-      return {
-        statusCode: 422,
+      return errorResponse({
         headers,
-        body: JSON.stringify({
-          error: "Could not read this prescription. The image may be too blurry or not a valid prescription.",
-          detail: parseError.message,
-        }),
-      };
+        requestId,
+        statusCode: 422,
+        code: CODES.IMAGE_UNREADABLE,
+        message: "Could not read this prescription. The image may be too blurry or not a valid prescription.",
+        detail: parseError.message,
+      });
     }
 
     // ── Step 3: Save prescription to DynamoDB ─────────────────────────────
@@ -538,6 +552,10 @@ module.exports.handler = async (event) => {
       )
     );
 
+    // Count genuine creation errors (rejections) separately from past-dose
+    // skips (fulfilled-but-null) so we can tell a total failure apart from a
+    // prescription that simply had nothing left to schedule.
+    let creationErrors = 0;
     results.forEach((result, i) => {
       const doseWithMed = dosesToSchedule[i];
       if (result.status === "fulfilled" && result.value) {
@@ -546,10 +564,26 @@ module.exports.handler = async (event) => {
         // null = skipped (past dose)
         skippedDoses.push(doseWithMed);
       } else {
+        creationErrors++;
         console.error(`Failed to schedule dose for ${doseWithMed.medication} on ${doseWithMed.date}:`, result.reason?.message);
         skippedDoses.push(doseWithMed);
       }
     });
+
+    // If we parsed the prescription but every reminder creation errored, that is
+    // a real failure — surface it instead of a misleading "0 reminders" success.
+    if (isTotalScheduleFailure(dosesToSchedule.length, scheduledDoses.length, creationErrors)) {
+      console.error(`[${userId}] All ${dosesToSchedule.length} schedule creation(s) failed`);
+      await markScheduleFailed({ userId, scheduleId, message: "All schedule creations failed" });
+      return errorResponse({
+        headers,
+        requestId,
+        statusCode: 502,
+        code: CODES.SCHEDULE_CREATE_FAILED,
+        message: "We read your prescription but couldn't set up any reminders. Please try again.",
+        detail: `0 of ${dosesToSchedule.length} reminders created`,
+      });
+    }
 
     // ── Step 5: Save schedule to DynamoDB (for Option B daily summary) ─────
     await dynamo.send(new UpdateCommand({
@@ -628,13 +662,27 @@ module.exports.handler = async (event) => {
   } catch (error) {
     console.error("Unhandled error:", error);
     await markScheduleFailed({ ...lockedSchedule, message: error.message });
-    return {
-      statusCode: 500,
+
+    // A typed ProcessingError (e.g. unsupported file type from getImageFromS3)
+    // carries its own status/code; anything else is an unclassified 500.
+    if (error instanceof ProcessingError) {
+      return errorResponse({
+        headers,
+        requestId,
+        statusCode: error.statusCode,
+        code: error.code,
+        message: error.message,
+        detail: error.detail,
+      });
+    }
+
+    return errorResponse({
       headers,
-      body: JSON.stringify({
-        error: "Something went wrong processing this prescription. Please try again.",
-        detail: error.message,
-      }),
-    };
+      requestId,
+      statusCode: 500,
+      code: CODES.PROCESSING_FAILED,
+      message: "Something went wrong processing this prescription. Please try again.",
+      detail: error.message,
+    });
   }
 };

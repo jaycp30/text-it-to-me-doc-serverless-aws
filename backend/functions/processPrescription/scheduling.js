@@ -32,19 +32,29 @@ const SCHEDULE_NAME_MAX_LENGTH = 64;
  * Accepts either the legacy single `imageKey` or the multi-page `imageKeys`
  * array, and enforces the MAX_IMAGES ceiling.
  *
+ * The error carries a stable `code` (kept in sync with processPrescription/errors.js
+ * without importing it, to avoid coupling this pure module to the error catalog).
+ *
  * @param {{ imageKey?: string, imageKeys?: string[] }} body
- * @returns {{ keys: string[], error: { statusCode: number, message: string } | null }}
+ * @returns {{ keys: string[], error: { statusCode: number, code: string, message: string } | null }}
  */
 function validateImageKeys({ imageKey, imageKeys } = {}) {
   const keys = Array.isArray(imageKeys) ? imageKeys : imageKey ? [imageKey] : [];
 
   if (!keys.length) {
-    return { keys, error: { statusCode: 400, message: "imageKey or imageKeys is required" } };
+    return {
+      keys,
+      error: { statusCode: 400, code: "MISSING_IMAGES", message: "imageKey or imageKeys is required" },
+    };
   }
   if (keys.length > MAX_IMAGES) {
     return {
       keys,
-      error: { statusCode: 400, message: `A maximum of ${MAX_IMAGES} images can be processed at once` },
+      error: {
+        statusCode: 400,
+        code: "TOO_MANY_IMAGES",
+        message: `A maximum of ${MAX_IMAGES} images can be processed at once`,
+      },
     };
   }
   return { keys, error: null };
@@ -191,6 +201,20 @@ function buildScheduleName(dose, unique = randomUUID().slice(0, 8)) {
     .substring(0, SCHEDULE_NAME_MAX_LENGTH);
 }
 
+/**
+ * Whether reminder creation failed completely: there were doses to schedule, none
+ * succeeded, and at least one failed due to a creation *error* (not a past-dose
+ * skip). This is the case that should surface SCHEDULE_CREATE_FAILED rather than
+ * a misleading "0 reminders scheduled" success.
+ *
+ * @param {number} attempted       count of doses we tried to schedule
+ * @param {number} scheduled       count that succeeded
+ * @param {number} creationErrors  count that threw during creation
+ */
+function isTotalScheduleFailure(attempted, scheduled, creationErrors) {
+  return attempted > 0 && scheduled === 0 && creationErrors > 0;
+}
+
 module.exports = {
   MAX_IMAGES,
   DEFAULT_RECURRING_DAYS,
@@ -202,4 +226,5 @@ module.exports = {
   doseToUtc,
   isDosePast,
   buildScheduleName,
+  isTotalScheduleFailure,
 };
