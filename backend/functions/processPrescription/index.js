@@ -332,7 +332,7 @@ function getIdempotencyKey({ uploadId, keys, userId }) {
   return shortHash(`${userId}:${source}`, 40);
 }
 
-function responseFromCompletedSchedule(schedule, headers, replay = false) {
+function responseFromCompletedSchedule(schedule, headers, replay = false, confirmation = null) {
   const medications = schedule.prescription?.medications || schedule.medications || [];
   const scheduledDoses = schedule.scheduledDoses || [];
   const skippedDoses = schedule.skippedDoses || [];
@@ -354,6 +354,10 @@ function responseFromCompletedSchedule(schedule, headers, replay = false) {
         dosesSkipped: skippedDoses.length,
         skippedReason: skippedDoses.length > 0 ? "Doses in the past or PRN medications are not scheduled" : null,
       },
+      // Whether a subscription confirmation email was queued (email method only).
+      // `queued` reflects that the async send was accepted, not SES delivery —
+      // the frontend offers a resend for the "queued but never arrived" case.
+      ...(confirmation ? { confirmation } : {}),
       message: `Found ${medications.length} medication(s). ${scheduledDoses.length} dose reminder(s) scheduled.`,
     }),
   };
@@ -627,7 +631,12 @@ module.exports.handler = async (event, context) => {
     // calling the public /notify-test endpoint — keeps that endpoint off the
     // critical path so it can be locked down. Fire-and-forget: never blocks or
     // fails the response.
-    if ((notificationMethod || "sms") === "email" && contactInfo && NOTIFIER_FUNCTION_ARN) {
+    const isEmail = (notificationMethod || "sms") === "email";
+    let confirmation = null;
+    if (isEmail && contactInfo && NOTIFIER_FUNCTION_ARN) {
+      // queued = the async send was accepted; false if we couldn't even hand it
+      // off. The frontend shows this status and offers a resend.
+      let queued = false;
       try {
         await lambda.send(new InvokeCommand({
           FunctionName: NOTIFIER_FUNCTION_ARN,
@@ -642,10 +651,12 @@ module.exports.handler = async (event, context) => {
             userTimezone: timezone,
           })),
         }));
+        queued = true;
         console.log(`[${userId}] Queued subscription confirmation email`);
       } catch (notifyError) {
         console.error(`[${userId}] Failed to queue subscription email:`, notifyError.message);
       }
+      confirmation = { channel: "email", queued };
     }
 
     // ── Step 6: Respond to frontend ───────────────────────────────────────
@@ -657,7 +668,7 @@ module.exports.handler = async (event, context) => {
       medications: prescription.medications,
       scheduledDoses,
       skippedDoses,
-    }, headers);
+    }, headers, false, confirmation);
 
   } catch (error) {
     console.error("Unhandled error:", error);
