@@ -19,16 +19,21 @@ const { DynamoDBDocumentClient, GetCommand, PutCommand, UpdateCommand } = requir
 const { S3Client, GetObjectCommand } = require("@aws-sdk/client-s3");
 const { SchedulerClient, CreateScheduleCommand } = require("@aws-sdk/client-scheduler");
 const { LambdaClient, InvokeCommand } = require("@aws-sdk/client-lambda");
-const { DateTime } = require("luxon");
-const { createHash, createHmac, randomUUID } = require("crypto");
+const { createHash, createHmac } = require("crypto");
 
-const MAX_IMAGES = 5;
+// Pure scheduling logic (validation, recurring expansion, past-dose skip,
+// schedule-name building) lives in scheduling.js so it can be unit-tested
+// without AWS. See backend/tests/scheduling.test.js.
+const {
+  MAX_IMAGES,
+  validateImageKeys,
+  buildDosesToSchedule,
+  doseToUtc,
+  isDosePast,
+  buildScheduleName,
+} = require("./scheduling");
+
 const BEDROCK_IMAGE_TYPES = new Set(["image/jpeg", "image/png", "image/webp"]);
-
-// Recurring / maintenance meds come back from Bedrock with date: null and only
-// a time-of-day. We expand each into one dated dose per day across a window.
-const DEFAULT_RECURRING_DAYS = 30;    // horizon for open-ended meds (no end_date/duration)
-const MAX_OCCURRENCES_PER_DOSE = 60;  // safety cap on EventBridge rules per dose entry
 
 // ─── AWS clients ─────────────────────────────────────────────────────────────
 const bedrock   = new BedrockRuntimeClient({ region: process.env.AWS_REGION });
@@ -254,50 +259,6 @@ function parsePrescription(rawText) {
 }
 
 /**
- * Expand a single dose entry into one or more DATED dose objects.
- *
- * - A dose that already has a `date` (taper / fixed-with-date) is returned as-is.
- * - A date-less dose (recurring / maintenance med, e.g. "1 capsule once daily")
- *   is expanded into one dated dose per day across a window:
- *     start = later of (prescription date, today)   — never schedule the past
- *     end   = med.end_date, else prescriptionDate + duration_days,
- *             else today + DEFAULT_RECURRING_DAYS    — open-ended maintenance
- *   capped at MAX_OCCURRENCES_PER_DOSE to bound the number of EventBridge rules.
- */
-function expandDoseToDates({ med, dose, prescriptionDate, timezone }) {
-  if (dose.date) return [dose];          // already dated — taper/fixed
-  if (!dose.time) return [];             // no time either — cannot schedule
-
-  const today  = DateTime.now().setZone(timezone).startOf("day");
-  const rxStart = prescriptionDate
-    ? DateTime.fromISO(prescriptionDate, { zone: timezone }).startOf("day")
-    : today;
-
-  // Never generate past dates — start from the later of rx date and today.
-  const start = rxStart > today ? rxStart : today;
-
-  // Determine the end of the window.
-  let end;
-  if (med.end_date) {
-    end = DateTime.fromISO(med.end_date, { zone: timezone }).startOf("day");
-  } else if (med.duration_days) {
-    end = rxStart.plus({ days: med.duration_days - 1 });
-  } else {
-    end = today.plus({ days: DEFAULT_RECURRING_DAYS });
-  }
-
-  if (!end.isValid || end < start) return [];
-
-  const dates = [];
-  let cursor = start;
-  while (cursor <= end && dates.length < MAX_OCCURRENCES_PER_DOSE) {
-    dates.push({ ...dose, date: cursor.toISODate() });
-    cursor = cursor.plus({ days: 1 });
-  }
-  return dates;
-}
-
-/**
  * Create a single EventBridge Scheduler rule for one dose event.
  * The rule fires once at the exact dose time, then auto-deletes.
  */
@@ -307,26 +268,17 @@ async function createDoseSchedule({ scheduleId, dose, userId, userTimezone, noti
     return null;
   }
 
-  // Convert local dose time to UTC
-  const localDT = DateTime.fromISO(`${dose.date}T${dose.time}`, { zone: userTimezone });
-  const utcDT = localDT.toUTC();
-
   // Skip doses in the past
-  if (utcDT < DateTime.utc()) {
+  if (isDosePast(dose, userTimezone)) {
     console.log(`Skipping past dose: ${dose.date} ${dose.time} (${userTimezone})`);
     return null;
   }
 
-  // EventBridge Scheduler "Name" must match [a-zA-Z0-9-_.], be unique within
-  // the group, and be <= 64 characters (NOT 512). Build a short, readable,
-  // collision-proof name: a truncated medication slug + a random 8-char suffix.
-  const medSlug = (dose.medication || "med")
-    .replace(/[^a-zA-Z0-9]/g, "")
-    .substring(0, 18);
-  const unique = randomUUID().slice(0, 8);
-  const safeName = `rx-${dose.date}-${dose.time.replace(":", "")}-${medSlug}-${unique}`
-    .replace(/[^a-zA-Z0-9-_]/g, "-")
-    .substring(0, 64);  // EventBridge Scheduler hard limit
+  // Convert local dose time to UTC for the "at()" expression below.
+  const utcDT = doseToUtc(dose, userTimezone);
+
+  // Collision-proof rule name, hard-capped at 64 chars (see scheduling.js).
+  const safeName = buildScheduleName(dose);
 
   const command = new CreateScheduleCommand({
     Name: safeName,
@@ -452,9 +404,8 @@ module.exports.handler = async (event) => {
     } = body;
 
     // ── Validation ────────────────────────────────────────────────────────
-    const keys = Array.isArray(imageKeys) ? imageKeys : imageKey ? [imageKey] : [];
-    if (!keys.length) return { statusCode: 400, headers, body: JSON.stringify({ error: "imageKey or imageKeys is required" }) };
-    if (keys.length > MAX_IMAGES) return { statusCode: 400, headers, body: JSON.stringify({ error: `A maximum of ${MAX_IMAGES} images can be processed at once` }) };
+    const { keys, error: imageKeysError } = validateImageKeys({ imageKey, imageKeys });
+    if (imageKeysError) return { statusCode: imageKeysError.statusCode, headers, body: JSON.stringify({ error: imageKeysError.message }) };
     if (!userId)    return { statusCode: 400, headers, body: JSON.stringify({ error: "userId is required" }) };
     if (!contactInfo) return { statusCode: 400, headers, body: JSON.stringify({ error: "contactInfo (phone or email) is required" }) };
 
@@ -563,47 +514,12 @@ module.exports.handler = async (event) => {
 
     // ── Step 4: Create per-dose EventBridge rules (Option A) ──────────────
     const scheduledDoses = [];
-    const skippedDoses = [];
 
     // Phase 1: flatten every medication into a list of dated dose objects.
-    // Recurring/date-less doses are expanded here; tapers pass through.
-    const dosesToSchedule = [];
-
-    for (const med of prescription.medications || []) {
-      // Skip PRN (as needed) — these have no fixed schedule
-      if (med.schedule_type === "prn") {
-        console.log(`[${userId}] Skipping PRN medication: ${med.name}`);
-        continue;
-      }
-
-      for (const dose of med.doses || []) {
-        if (dose.as_needed) continue;
-
-        const datedDoses = expandDoseToDates({
-          med,
-          dose,
-          prescriptionDate: prescription.prescription_date,
-          timezone,
-        });
-
-        if (datedDoses.length === 0) {
-          console.log(`Skipping dose with no schedulable date/time for ${med.name}:`, dose);
-          skippedDoses.push({ medication: med.name, ...dose });
-          continue;
-        }
-
-        for (const datedDose of datedDoses) {
-          dosesToSchedule.push({
-            medication: med.name,
-            brand: med.brand,
-            form: med.form,
-            dose_mg: med.dose_mg,
-            special_instructions: med.special_instructions,
-            ...datedDose,
-          });
-        }
-      }
-    }
+    // PRN medications and as-needed doses are skipped; recurring/date-less
+    // doses are expanded (one per day across the window); tapers pass through.
+    // The rules live in scheduling.js — see backend/tests/scheduling.test.js.
+    const { dosesToSchedule, skippedDoses } = buildDosesToSchedule(prescription, timezone);
 
     // Phase 2: create all EventBridge rules in parallel. With recurring meds a
     // prescription can expand to dozens of doses; running these sequentially

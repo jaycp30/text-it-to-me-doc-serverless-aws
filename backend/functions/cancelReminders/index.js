@@ -12,7 +12,10 @@
 const { DynamoDBClient } = require("@aws-sdk/client-dynamodb");
 const { DynamoDBDocumentClient, QueryCommand, UpdateCommand } = require("@aws-sdk/lib-dynamodb");
 const { SchedulerClient, DeleteScheduleCommand } = require("@aws-sdk/client-scheduler");
-const { createHmac } = require("crypto");
+
+// Pure helpers (token verification, idempotent cancel counting) live in lib.js
+// so they can be unit-tested without AWS. See backend/tests/cancelReminders.test.js.
+const { verifySessionToken, collectRuleNames, countCancelled } = require("./lib");
 
 const dynamo    = DynamoDBDocumentClient.from(new DynamoDBClient({}));
 const scheduler = new SchedulerClient({});
@@ -26,23 +29,6 @@ const HEADERS = {
   "Access-Control-Allow-Origin": "*",
 };
 
-function verifySessionToken(token) {
-  if (!MAGIC_LINK_SECRET || !token) return null;
-  const parts = String(token).split(".");
-  if (parts.length !== 2) return null;
-  const [payload, sig] = parts;
-  const expected = createHmac("sha256", MAGIC_LINK_SECRET).update(payload).digest("base64url");
-  if (sig !== expected) return null;
-  try {
-    const data = JSON.parse(Buffer.from(payload, "base64url").toString());
-    if (!data.uid || !data.exp) return null;
-    if (Math.floor(Date.now() / 1000) > data.exp) return null;
-    return data.uid;
-  } catch {
-    return null;
-  }
-}
-
 module.exports.handler = async (event) => {
   try {
     const userId = event.pathParameters?.userId;
@@ -52,7 +38,7 @@ module.exports.handler = async (event) => {
       return { statusCode: 400, headers: HEADERS, body: JSON.stringify({ error: "userId required" }) };
     }
 
-    const tokenUserId = verifySessionToken(token);
+    const tokenUserId = verifySessionToken(token, MAGIC_LINK_SECRET);
     if (!tokenUserId || tokenUserId !== userId) {
       return {
         statusCode: 401,
@@ -84,11 +70,7 @@ module.exports.handler = async (event) => {
     //    then delete them in parallel. A user with recurring meds can have
     //    dozens of rules; sequential deletes would add seconds and risk the
     //    API Gateway 30s timeout.
-    const ruleNames = schedules.flatMap((schedule) =>
-      (schedule.scheduledDoses || [])
-        .map((dose) => dose.scheduleName)
-        .filter(Boolean)
-    );
+    const ruleNames = collectRuleNames(schedules);
 
     const deleteResults = await Promise.allSettled(
       ruleNames.map((name) =>
@@ -99,14 +81,11 @@ module.exports.handler = async (event) => {
       )
     );
 
-    let cancelledCount = 0;
+    // Rules already fired-and-auto-deleted (ResourceNotFoundException) count as
+    // handled — this is what makes a repeated unsubscribe idempotent.
+    const cancelledCount = countCancelled(deleteResults);
     deleteResults.forEach((result, i) => {
-      if (result.status === "fulfilled") {
-        cancelledCount++;
-      } else if (result.reason?.name === "ResourceNotFoundException") {
-        // Already fired and auto-deleted — that's fine, count it as handled
-        cancelledCount++;
-      } else {
+      if (result.status === "rejected" && result.reason?.name !== "ResourceNotFoundException") {
         console.error(`Failed to delete schedule ${ruleNames[i]}:`, result.reason?.message);
       }
     });
