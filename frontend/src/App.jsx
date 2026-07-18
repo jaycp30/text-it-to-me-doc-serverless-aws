@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import Icon from './Icons';
 import { ApiError, classifyError, resolveErrorCopy, UNKNOWN_CODE } from './errors';
 import { deriveConfirmationStatus, canResend, cooldownRemainingMs, RESEND_COOLDOWN_MS } from './confirmation';
+import { SCHEDULE_STATUS, pickCurrentSchedule, summarizeSchedule } from './schedule';
 
 // Client-side ceiling for the /process request. API Gateway caps out around 29s,
 // so we abort a little past that and show a TIMEOUT rather than hang forever.
@@ -856,6 +857,7 @@ function Sidebar({ screen, tab, setTab, onNewRx, onChat }) {
     { id: 'today',    label: 'Today',       icon: 'sun'      },
     { id: 'upcoming', label: 'Upcoming',    icon: 'calendar' },
     { id: 'meds',     label: 'Medications', icon: 'pill'     },
+    { id: 'manage',   label: 'Reminders',   icon: 'sliders'  },
   ];
 
   return (
@@ -2401,14 +2403,201 @@ function ConfirmationBanner({ rx }) {
   );
 }
 
-function ScheduleScreen({ rx, tab, setTab, showTabBar = true }) {
+/* ─────────────────────────────────────────────────────────────────────────────
+   SCHEDULE MANAGEMENT (issue #9)
+   A clear "current reminder plan" view: status, created date, contact method,
+   timezone, dose count — plus cancel and replace actions. Reads authoritative
+   metadata from GET /schedules; falls back to locally-stored details offline.
+   Pure status/pick/summarize logic lives in schedule.js (unit-tested).
+───────────────────────────────────────────────────────────────────────────── */
+function formatScheduleTimestamp(iso, tz) {
+  if (!iso) return '—';
+  try {
+    return new Date(iso).toLocaleString([], {
+      dateStyle: 'medium', timeStyle: 'short', ...(tz ? { timeZone: tz } : {}),
+    });
+  } catch {
+    return new Date(iso).toLocaleString();
+  }
+}
+
+const STATUS_LABEL = {
+  [SCHEDULE_STATUS.ACTIVE]:    { label: 'Active',    color: 'var(--sage)',  bg: 'rgba(94,126,104,0.14)' },
+  [SCHEDULE_STATUS.CANCELLED]: { label: 'Cancelled', color: 'var(--peach)', bg: 'var(--peach-lt)'       },
+  [SCHEDULE_STATUS.PROCESSING]:{ label: 'Processing',color: 'var(--lav)',   bg: 'var(--lav-lt)'         },
+  [SCHEDULE_STATUS.FAILED]:    { label: 'Failed',    color: 'var(--danger)',bg: 'var(--danger-lt)'      },
+  [SCHEDULE_STATUS.INACTIVE]:  { label: 'Inactive',  color: 'var(--text3)', bg: 'var(--bg3)'            },
+  unknown:                     { label: 'Unknown',   color: 'var(--text3)', bg: 'var(--bg3)'            },
+};
+
+function MetaRow({ label, value }) {
+  return (
+    <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, padding: '10px 0', borderBottom: '1px solid var(--glass-line)' }}>
+      <span style={{ fontSize: 13, color: 'var(--text3)' }}>{label}</span>
+      <span style={{ fontSize: 14, color: 'var(--text)', fontWeight: 600, textAlign: 'right', wordBreak: 'break-word' }}>{value}</span>
+    </div>
+  );
+}
+
+function ScheduleManagement({ onReplace }) {
+  const details = getStoredReminderDetails();
+  const token = getStoredSessionToken();
+
+  const [schedule, setSchedule] = useState(null);
+  const [loading, setLoading]   = useState(Boolean(API_BASE && token));
+  const [loadError, setLoadError] = useState('');
+  const [cancelling, setCancelling] = useState(false);
+  const [actionMsg, setActionMsg] = useState(null); // { ok, message }
+
+  async function load() {
+    if (!API_BASE || !token) { setLoading(false); return; }
+    setLoading(true); setLoadError('');
+    try {
+      const res = await fetch(`${API_BASE}/schedules?token=${encodeURIComponent(token)}&includeInactive=true`);
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || 'Could not load your reminder schedule.');
+      setSchedule(pickCurrentSchedule(data.schedules));
+    } catch (err) {
+      setLoadError(err.message || 'Could not load your reminder schedule.');
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  useEffect(() => { load(); /* on mount */ // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  async function handleCancel() {
+    if (!API_BASE || !token) {
+      setActionMsg({ ok: false, message: 'No active session found. Re-upload your prescription first.' });
+      return;
+    }
+    setCancelling(true); setActionMsg(null);
+    try {
+      const url = `${API_BASE}/reminders/${encodeURIComponent(details.userId)}?token=${encodeURIComponent(token)}`;
+      const res = await fetch(url, { method: 'DELETE' });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || 'Could not cancel reminders.');
+      setActionMsg({ ok: true, message: data.message || 'Reminders cancelled.' });
+      await load(); // refresh so the status flips to Cancelled
+    } catch (err) {
+      setActionMsg({ ok: false, message: err.message || 'Could not cancel reminders.' });
+    } finally {
+      setCancelling(false);
+    }
+  }
+
+  // Prefer server truth; fall back to locally-stored setup details (demo/offline).
+  const summary = summarizeSchedule(schedule) || {
+    status: 'unknown',
+    createdAt: null, cancelledAt: null,
+    channel: details.notificationMethod, contact: details.contactInfo,
+    timezone: details.userTimezone, doseCount: null, medCount: null,
+  };
+
+  const badge = STATUS_LABEL[summary.status] || STATUS_LABEL.unknown;
+  const isActive = summary.status === SCHEDULE_STATUS.ACTIVE;
+  const isCancelled = summary.status === SCHEDULE_STATUS.CANCELLED;
+  const channelLabel = summary.channel === 'sms' ? 'SMS' : 'Email';
+
+  return (
+    <div className="anim-fade-up today-wrap">
+      <div className="glass" style={{
+        borderRadius: 'var(--r-xl)', padding: '20px',
+        border: `1px solid ${isCancelled ? 'rgba(232,92,92,0.28)' : 'var(--card-bdr)'}`,
+        background: isCancelled ? 'var(--danger-lt)' : 'var(--card)',
+      }}>
+        {/* Header: title + status badge */}
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 4 }}>
+          <p style={{ fontFamily: 'var(--font-head)', fontWeight: 700, fontSize: 18, color: 'var(--text)' }}>
+            Your reminder plan
+          </p>
+          <span style={{
+            fontSize: 12, fontWeight: 700, color: badge.color, background: badge.bg,
+            padding: '4px 12px', borderRadius: 'var(--r-full)', whiteSpace: 'nowrap',
+          }}>{badge.label}</span>
+        </div>
+
+        {loading ? (
+          <p style={{ fontSize: 14, color: 'var(--text2)', padding: '14px 0' }}>Loading your schedule…</p>
+        ) : (
+          <>
+            {loadError && (
+              <p style={{ fontSize: 13, color: 'var(--danger)', margin: '4px 0 10px' }}>{loadError}</p>
+            )}
+
+            <div style={{ marginTop: 8 }}>
+              <MetaRow label="Reminders via" value={summary.contact ? `${channelLabel} · ${summary.contact}` : channelLabel} />
+              <MetaRow label="Timezone" value={summary.timezone || '—'} />
+              <MetaRow label="Dose reminders" value={summary.doseCount == null ? '—' : `${summary.doseCount} scheduled`} />
+              <MetaRow label="Created" value={formatScheduleTimestamp(summary.createdAt, summary.timezone)} />
+              {isCancelled && (
+                <MetaRow label="Cancelled" value={formatScheduleTimestamp(summary.cancelledAt, summary.timezone)} />
+              )}
+            </div>
+
+            {isCancelled && (
+              <p style={{ fontSize: 13, color: 'var(--text2)', lineHeight: 1.55, marginTop: 12 }}>
+                These reminders are cancelled — you won't receive any more. Upload a new prescription to set up a fresh schedule.
+              </p>
+            )}
+
+            {/* Actions */}
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 10, marginTop: 18 }}>
+              {isActive && (
+                <button
+                  onClick={handleCancel}
+                  disabled={cancelling}
+                  style={{
+                    width: '100%', padding: '13px', borderRadius: 'var(--r-full)',
+                    background: cancelling ? 'var(--bg3)' : 'var(--peach-lt)',
+                    color: cancelling ? 'var(--text3)' : 'var(--peach)',
+                    fontFamily: 'var(--font-head)', fontWeight: 600, fontSize: 15,
+                  }}
+                >
+                  {cancelling ? 'Cancelling…' : 'Cancel reminders'}
+                </button>
+              )}
+              <button
+                onClick={onReplace}
+                style={{
+                  width: '100%', padding: '13px', borderRadius: 'var(--r-full)',
+                  background: isActive ? 'var(--bg2)' : 'var(--sage)',
+                  color: isActive ? 'var(--text)' : '#fff',
+                  fontFamily: 'var(--font-head)', fontWeight: 600, fontSize: 15,
+                  display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8,
+                }}
+              >
+                <Icon name="camera" size={17} strokeWidth={2} />
+                {isActive ? 'Replace with a new prescription' : 'Upload a new prescription'}
+              </button>
+            </div>
+
+            {actionMsg && (
+              <p style={{ fontSize: 13, marginTop: 12, color: actionMsg.ok ? 'var(--sage)' : 'var(--danger)' }}>
+                {actionMsg.message}
+              </p>
+            )}
+          </>
+        )}
+      </div>
+
+      <Notice style={{ marginTop: 16 }}>
+        Reminders are sent from RxReader. Always follow your doctor's or pharmacist's instructions.
+      </Notice>
+    </div>
+  );
+}
+
+function ScheduleScreen({ rx, tab, setTab, showTabBar = true, onReplace }) {
   const [scheduleStartDate, setScheduleStartDate] = useState(() => defaultScheduleStartDate(rx));
   const [doses, setDoses] = useState(() => buildDosesForDate(rx, new Date(), defaultScheduleStartDate(rx)));
 
   const tabs = [
     { id: 'today',    label: 'Today',       icon: 'sun'      },
     { id: 'upcoming', label: 'Upcoming',    icon: 'calendar' },
-    { id: 'meds',     label: 'Medications', icon: 'pill'     },
+    { id: 'meds',     label: 'Meds',        icon: 'pill'     },
+    { id: 'manage',   label: 'Reminders',   icon: 'sliders'  },
   ];
 
   useEffect(() => {
@@ -2603,6 +2792,10 @@ function ScheduleScreen({ rx, tab, setTab, showTabBar = true }) {
               <MedCard key={m.id} med={m} />
             ))}
           </div>
+        )}
+
+        {tab === 'manage' && (
+          <ScheduleManagement onReplace={onReplace} />
         )}
       </div>
     </div>
@@ -3280,6 +3473,7 @@ export default function App() {
           tab={tab}
           setTab={setTab}
           showTabBar={!isDesktop}
+          onReplace={handleBack}
         />
       )}
     </>
