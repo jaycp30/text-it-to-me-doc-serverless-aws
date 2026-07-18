@@ -1,0 +1,16 @@
+{
+  "name": "text-it-to-me-doc",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Repo-root workspace for backend regression tests (see backend/tests). The Lambda functions and frontend keep their own package.json.",
+  "scripts": {
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage"
+  },
+  "devDependencies": {
+    "luxon": "^3.5.0",
+    "vitest": "^2.1.8"
+  }
+}
