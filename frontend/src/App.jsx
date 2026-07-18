@@ -92,7 +92,9 @@ const GLOBAL_CSS = `
     font-family: var(--font-body);
     color: var(--text);
     min-height: 100dvh;
-    overflow-x: hidden;
+    /* clip (not hidden) prevents horizontal scroll WITHOUT creating a scroll
+       container — hidden would, which breaks the sidebar's position: sticky. */
+    overflow-x: clip;
     -webkit-font-smoothing: antialiased;
   }
 
@@ -100,7 +102,7 @@ const GLOBAL_CSS = `
     width: 100%;
     min-height: 100dvh;
     position: relative;
-    overflow-x: hidden;
+    overflow-x: clip;
   }
 
   /* ── Responsive shell (desktop ≥ 900px) ── */
