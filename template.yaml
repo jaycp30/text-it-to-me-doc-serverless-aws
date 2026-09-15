@@ -421,6 +421,61 @@ Resources:
             Path: /chat
             Method: POST
 
+  # ── CloudWatch log groups ─────────────────────────────────────────────────
+  # Declared explicitly purely to set retention. Left alone, Lambda creates
+  # each group on first invocation with "Never Expire" — which is how logs
+  # quietly become the longest-lived copy of the most sensitive data in the
+  # system, outliving both the DynamoDB TTL and the S3 expiry above.
+  #
+  # 30 days is an operational window, not a user-data one: the handlers no
+  # longer log contact details or medication data (see the same PR), so what
+  # remains here is diagnostics.
+  #
+  # DEPLOY NOTE: CloudFormation cannot adopt a log group that already exists.
+  # On a stack that has already run, the auto-created /aws/lambda/rx-* groups
+  # must be deleted before this deploys — see DEPLOY.md, "One-time migration".
+  GetUploadUrlLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /aws/lambda/rx-get-upload-url
+      RetentionInDays: 30
+
+  ProcessPrescriptionLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /aws/lambda/rx-process-prescription
+      RetentionInDays: 30
+
+  NotifyUserLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /aws/lambda/rx-notify-user
+      RetentionInDays: 30
+
+  DailySummaryLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /aws/lambda/rx-daily-summary
+      RetentionInDays: 30
+
+  CancelRemindersLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /aws/lambda/rx-cancel-reminders
+      RetentionInDays: 30
+
+  GetSchedulesLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /aws/lambda/rx-get-schedules
+      RetentionInDays: 30
+
+  ChatLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /aws/lambda/rx-chat
+      RetentionInDays: 30
+
 # ─── Outputs ────────────────────────────────────────────────────────────────
 Outputs:
   ApiUrl:

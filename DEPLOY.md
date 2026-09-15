@@ -438,6 +438,53 @@ Subsequent deploys are just:
 sam build && sam deploy
 ```
 
+### One-time migration — log retention (run once, before your next deploy)
+
+The template now declares a `AWS::Logs::LogGroup` for each function so retention is
+set to 30 days in IaC. Left undeclared, Lambda creates these groups itself on first
+invocation and they default to **Never Expire**.
+
+**CloudFormation cannot adopt a log group that already exists.** The stack has been
+deployed and the functions have run, so those groups exist — and deploying this
+change without clearing them first fails with
+`rx-get-upload-url already exists in stack`. You only hit this once; a fresh stack
+deploys straight through.
+
+Delete the auto-created groups first. This is also the purge the compliance pass
+called for: everything currently in them predates the redaction fixes, so it still
+holds unredacted contact details and medication data.
+
+Check what you are about to delete:
+
+```bash
+aws logs describe-log-groups \
+  --log-group-name-prefix /aws/lambda/rx- \
+  --region ap-northeast-1 \
+  --query "logGroups[].{name:logGroupName,retention:retentionInDays,bytes:storedBytes}" \
+  --output table
+```
+
+**This next step is irreversible and destroys all existing Lambda logs for this
+stack.** That is intended here — the history is exactly what needs purging — but
+export anything you still want first.
+
+```bash
+for lg in rx-get-upload-url rx-process-prescription rx-notify-user rx-daily-summary rx-cancel-reminders rx-get-schedules rx-chat; do
+  aws logs delete-log-group --log-group-name "/aws/lambda/$lg" --region ap-northeast-1
+done
+```
+
+Then deploy normally with `sam build && sam deploy`. Afterwards, confirm no group
+reports `null` retention:
+
+```bash
+aws logs describe-log-groups \
+  --log-group-name-prefix /aws/lambda/rx- \
+  --region ap-northeast-1 \
+  --query "logGroups[].{name:logGroupName,days:retentionInDays}" \
+  --output table
+```
+
 **Quick backend smoke test** (no app needed):
 ```bash
 API="https://YOUR-API-ID.execute-api.ap-northeast-1.amazonaws.com/v1"
