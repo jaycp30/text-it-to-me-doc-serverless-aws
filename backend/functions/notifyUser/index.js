@@ -156,8 +156,11 @@ async function sendEmail(emailAddress, subject, bodyText, emailData = {}, userId
 
 // ─── Handler ──────────────────────────────────────────────────────────────────
 module.exports.handler = async (event) => {
-  console.log("NotifyUser event:", JSON.stringify(event, null, 2));
   const http = isHttpEvent(event);
+  // Never log the raw event. On a scheduler invocation it carries contactInfo
+  // (the raw email or phone number) and the medication name — which would undo
+  // the deliberate masking in sendSms/sendEmail below. Log the shape only.
+  console.log(`NotifyUser invoked via ${http ? "http" : "scheduler"}`);
 
   try {
     const payload = getPayload(event);

@@ -274,7 +274,9 @@ function parsePrescription(rawText) {
  */
 async function createDoseSchedule({ scheduleId, dose, userId, userTimezone, notificationMethod, contactInfo }) {
   if (!dose.date || !dose.time) {
-    console.log("Skipping dose with no date/time:", dose);
+    // Reason only — the dose object carries the medication name. The caller
+    // returns the full skippedDoses list to the frontend, so nothing is lost.
+    console.log("Skipping dose with no date/time");
     return null;
   }
 
@@ -415,7 +417,7 @@ module.exports.handler = async (event, context) => {
       imageKey,          // S3 key of the uploaded prescription image (legacy single-image path)
       imageKeys,         // S3 keys of uploaded prescription images (multi-page path)
       uploadId,          // shared S3 prefix segment for one prescription upload
-      userId,            // Cognito user sub (unique per user)
+      userId,            // pseudonymous browser-local id (localStorage UUID) — NOT an authenticated subject
       userTimezone,      // IANA timezone string e.g. "Asia/Manila"
       notificationMethod,// "sms" | "email"
       contactInfo,       // phone number (+63...) or email address
@@ -494,14 +496,16 @@ module.exports.handler = async (event, context) => {
     // ── Step 2: Call Bedrock Claude ───────────────────────────────────────
     console.log(`[${userId}] Calling Bedrock (model: ${BEDROCK_MODEL_ID})`);
     const rawResponse = await callBedrock(images);
-    console.log(`[${userId}] Raw Bedrock response:`, rawResponse.substring(0, 200));
+    // Shape only — the body of this response is the extracted medication data.
+    console.log(`[${userId}] Bedrock responded (${rawResponse.length} chars)`);
 
     let prescription;
     try {
       prescription = parsePrescription(rawResponse);
     } catch (parseError) {
-      console.error("Parse error:", parseError.message);
-      console.error("Raw response was:", rawResponse);
+      // An unparseable body is still model output about a real prescription,
+      // so log its size and the parser's complaint — never its contents.
+      console.error(`[${userId}] Parse error (${rawResponse.length} chars):`, parseError.message);
       await markScheduleFailed({ userId, scheduleId, message: parseError.message });
       return errorResponse({
         headers,
@@ -569,7 +573,7 @@ module.exports.handler = async (event, context) => {
         skippedDoses.push(doseWithMed);
       } else {
         creationErrors++;
-        console.error(`Failed to schedule dose for ${doseWithMed.medication} on ${doseWithMed.date}:`, result.reason?.message);
+        console.error(`[${userId}] Failed to schedule a dose:`, result.reason?.message);
         skippedDoses.push(doseWithMed);
       }
     });
