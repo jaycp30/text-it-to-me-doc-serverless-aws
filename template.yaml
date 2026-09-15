@@ -90,12 +90,15 @@ Resources:
             MaxAge: 3600
       LifecycleConfiguration:
         Rules:
-          # Prescriptions older than 1 year move to cheap storage
-          - Id: ArchiveOldPrescriptions
+          # Prescription images are write-once/read-once: processPrescription
+          # reads each object exactly once during extraction, and nothing reads
+          # it again afterwards (no presigned GET path exists anywhere in the
+          # API). Holding them past that point is retained health data serving
+          # no purpose, so they expire. 75 days leaves a wide window to re-check
+          # a bad extraction against the original image.
+          - Id: ExpirePrescriptionImages
             Status: Enabled
-            Transitions:
-              - TransitionInDays: 365
-                StorageClass: GLACIER
+            ExpirationInDays: 75
 
   # ── DynamoDB: prescriptions ───────────────────────────────────────────────
   PrescriptionsTable:
