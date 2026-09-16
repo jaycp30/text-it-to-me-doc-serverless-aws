@@ -1,0 +1,200 @@
+/*
+ * Styling for the standalone legal pages (privacy.html, terms.html).
+ *
+ * These pages are deliberately plain HTML rather than React screens: a privacy
+ * policy has to be readable even when JavaScript is unavailable, and the app's
+ * own index.html shows a <noscript> warning instead of content. They also load
+ * without the 220 KB app bundle.
+ *
+ * Palette tokens mirror :root in App.jsx (GLOBAL_CSS) so the pages match the
+ * app in both light and dark mode. Keep them in sync if the app palette moves.
+ */
+
+:root {
+  --bg:         #FAFFC7;
+  --bg2:        #F2F6B4;
+  --sage:       #5E7E68;
+  --sage-dk:    #4A6652;
+  --peach:      #E8927C;
+  --peach-lt:   #FDF0EC;
+  --text:       #2C2C2C;
+  --text2:      #6B6B6B;
+  --card:       rgba(255, 255, 255, 0.68);
+  --glass-line: rgba(94, 126, 104, 0.13);
+  --font-head:  'Poppins', sans-serif;
+  --font-body:  'DM Sans', sans-serif;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg:         #1A1825;
+    --bg2:        #231F33;
+    --sage:       #8FB39B;
+    --sage-dk:    #A8C6B3;
+    --peach:      #E8927C;
+    --peach-lt:   rgba(232, 146, 124, 0.12);
+    --text:       #F0EDE8;
+    --text2:      #A8A8A8;
+    --card:       rgba(255, 255, 255, 0.06);
+    --glass-line: rgba(155, 142, 196, 0.22);
+  }
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  /* 16px side gutter on phones; the measure below keeps lines readable. */
+  padding: 0 16px 72px;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-body);
+  font-size: 16px;
+  line-height: 1.7;
+  -webkit-font-smoothing: antialiased;
+}
+
+.wrap {
+  max-width: 68ch;   /* ~68 characters is the comfortable reading measure */
+  margin: 0 auto;
+}
+
+/* ── Header ─────────────────────────────────────────────────────────────── */
+
+header {
+  padding: 40px 0 28px;
+  border-bottom: 1px solid var(--glass-line);
+  margin-bottom: 36px;
+}
+
+.back {
+  display: inline-block;
+  margin-bottom: 24px;
+  color: var(--sage-dk);
+  font-family: var(--font-head);
+  font-weight: 600;
+  font-size: 14px;
+  text-decoration: none;
+}
+
+.back:hover,
+.back:focus-visible { text-decoration: underline; }
+
+h1 {
+  font-family: var(--font-head);
+  font-weight: 700;
+  font-size: clamp(28px, 7vw, 40px);
+  line-height: 1.15;
+  letter-spacing: -0.02em;
+  margin: 0 0 10px;
+}
+
+.updated {
+  margin: 0;
+  color: var(--text2);
+  font-size: 14px;
+}
+
+/* ── Body ───────────────────────────────────────────────────────────────── */
+
+h2 {
+  font-family: var(--font-head);
+  font-weight: 600;
+  font-size: 20px;
+  line-height: 1.3;
+  letter-spacing: -0.01em;
+  margin: 40px 0 12px;
+}
+
+h3 {
+  font-family: var(--font-head);
+  font-weight: 600;
+  font-size: 16px;
+  margin: 24px 0 8px;
+}
+
+p { margin: 0 0 16px; }
+
+ul { margin: 0 0 16px; padding-left: 22px; }
+li { margin-bottom: 8px; }
+
+strong { font-weight: 600; }
+
+a { color: var(--sage-dk); }
+
+dl { margin: 0 0 16px; }
+dt {
+  font-family: var(--font-head);
+  font-weight: 600;
+  font-size: 15px;
+  margin-top: 16px;
+}
+dd { margin: 4px 0 0; color: var(--text2); }
+
+/* ── Callout ────────────────────────────────────────────────────────────── */
+
+.callout {
+  background: var(--peach-lt);
+  border: 1px solid rgba(232, 146, 124, 0.3);
+  border-radius: 16px;
+  padding: 18px 20px;
+  margin: 24px 0 32px;
+}
+
+.callout p { margin: 0; }
+.callout p + p { margin-top: 12px; }
+
+/* The lead-in deliberately inherits --text rather than taking --peach. Peach on
+   --peach-lt measures 2.13:1 in light mode, well under the 4.5:1 floor for body
+   text, and --peach-dk only reaches 3.01:1. The tinted panel and its border
+   already carry the accent, so weight alone carries the emphasis. */
+.callout strong { font-weight: 600; }
+
+/* ── Table ──────────────────────────────────────────────────────────────── */
+
+.table-scroll { overflow-x: auto; margin: 0 0 20px; }
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 15px;
+  /* Stops the columns collapsing to unreadable widths on a phone; the wrapper
+     scrolls horizontally instead of the whole page. */
+  min-width: 460px;
+}
+
+th, td {
+  text-align: left;
+  vertical-align: top;
+  padding: 10px 14px 10px 0;
+  border-bottom: 1px solid var(--glass-line);
+}
+
+th {
+  font-family: var(--font-head);
+  font-weight: 600;
+  font-size: 13px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text2);
+}
+
+/* ── Footer ─────────────────────────────────────────────────────────────── */
+
+footer {
+  margin-top: 48px;
+  padding-top: 24px;
+  border-top: 1px solid var(--glass-line);
+  color: var(--text2);
+  font-size: 14px;
+}
+
+footer a { margin-right: 18px; }
+
+/* ── Print ──────────────────────────────────────────────────────────────── */
+
+@media print {
+  body { background: #fff; color: #000; padding: 0; }
+  .back, footer { display: none; }
+  .callout { border: 1px solid #999; }
+}

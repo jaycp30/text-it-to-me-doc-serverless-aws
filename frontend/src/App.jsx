@@ -3180,6 +3180,44 @@ function ChatDrawer({ open, onClose, rx, isDesktop = false }) {
 /* ─────────────────────────────────────────────────────────────────────────────
    ROOT APP
 ───────────────────────────────────────────────────────────────────────────── */
+/* ─────────────────────────────────────────────────────────────────────────────
+   LEGAL FOOTER
+   Links to the privacy policy and terms. Those are plain HTML files in public/
+   rather than app screens on purpose: a privacy policy has to stay readable
+   when JavaScript is unavailable, and index.html renders only a <noscript>
+   notice in that case. Plain <a> tags, so each is a real navigable URL.
+
+   Rendered on every screen — the upload screen most of all, since that is where
+   a prescription is handed over.
+───────────────────────────────────────────────────────────────────────────── */
+function LegalFooter({ isDesktop = false }) {
+  const link = {
+    color: 'var(--text2)',
+    fontSize: 12.5,
+    textDecoration: 'none',
+    borderBottom: '1px solid var(--glass-line)',
+    paddingBottom: 1,
+  };
+
+  return (
+    <footer
+      style={{
+        // Clears the chat FAB (fixed bottom-right, schedule screen only) on mobile.
+        padding: isDesktop ? '40px 0 28px' : '36px 20px 96px',
+        display: 'flex',
+        justifyContent: 'center',
+        alignItems: 'center',
+        gap: 14,
+        flexWrap: 'wrap',
+      }}
+    >
+      <a href="/privacy.html" style={link}>Privacy Policy</a>
+      <span aria-hidden="true" style={{ color: 'var(--text3)', fontSize: 12 }}>·</span>
+      <a href="/terms.html" style={link}>Terms of Service</a>
+    </footer>
+  );
+}
+
 export default function App() {
   const [screen, setScreen] = useState('home');    // 'home' | 'processing' | 'schedule' | 'error' | 'cancelled' | 'invalidLink'
   const [rx,     setRx]     = useState(null);
@@ -3531,6 +3569,7 @@ export default function App() {
           <main className="app-main">
             <div className={screen === 'schedule' ? 'wrap-wide' : 'wrap-narrow'}>
               {screenContent}
+              <LegalFooter isDesktop />
             </div>
           </main>
         </div>
@@ -3555,6 +3594,8 @@ export default function App() {
       <NavBar screen={screen} onBack={handleBack} />
 
       {screenContent}
+
+      <LegalFooter />
 
       {screen === 'schedule' && <ChatFab onClick={() => setChatOpen(true)} />}
 
