@@ -300,6 +300,11 @@ const ANTH_KEY    = import.meta.env.VITE_ANTHROPIC_KEY || '';
 const TURNSTILE_SITE_KEY = import.meta.env.VITE_TURNSTILE_SITE_KEY || '';
 const PREVIEW     = !API_BASE;
 const GITHUB_URL  = 'https://github.com/jaycp30/text-it-to-me-doc-serverless-aws';
+// Which privacy policy the user consents against. Sent with every /process call
+// and stored beside the record, so consent evidence says *what* was agreed to.
+// Bump this to match the "Last updated" date whenever public/privacy.html
+// changes in a way that affects how health data is handled.
+const POLICY_VERSION = '2026-09-16';
 const MAX_UPLOAD_IMAGES = 5;
 
 const PROCESSING_STAGES = {
@@ -1016,6 +1021,11 @@ function HomeScreen({ onUpload }) {
   const [cancelStatus, setCancelStatus] = useState('');
   const [reminderDetails, setReminderDetails] = useState(getStoredReminderDetails);
   const [formError, setFormError] = useState('');
+  // Deliberately its own state, never folded into reminderDetails: those are
+  // persisted to localStorage, and consent must never be pre-ticked from a
+  // previous visit. HomeScreen unmounts once processing starts, so this resets
+  // to false for every new upload on its own.
+  const [consentGiven, setConsentGiven] = useState(false);
 
   const browserTimezone = getBrowserTimezone();
   const timezoneOptions = [
@@ -1123,11 +1133,20 @@ function HomeScreen({ onUpload }) {
       setFormError(error);
       return;
     }
+    // The button is already disabled without consent; this is the second lock,
+    // so a stray programmatic call can't start an upload either. The real
+    // enforcement is server-side in validateConsent.
+    if (!consentGiven) {
+      setFormError('Please agree to your prescription being read before continuing.');
+      return;
+    }
 
     setLoading(true);
     await onUpload(files, {
       ...reminderDetails,
       contactInfo: reminderDetails.contactInfo.trim(),
+      consent: true,
+      policyVersion: POLICY_VERSION,
     });
     setLoading(false);
   }
@@ -1411,6 +1430,61 @@ function HomeScreen({ onUpload }) {
             </select>
           </label>
 
+          {/*
+            Article 9 explicit consent. A prescription image is special category
+            health data, so it needs a specific, affirmative, unticked opt-in —
+            kept separate from the Terms acceptance below, because rolling it
+            into a general "I accept the terms" would stop it being *specific*.
+            A real <input type="checkbox"> rather than a styled div, so it is
+            keyboard-reachable and announced correctly by screen readers.
+          */}
+          <label
+            style={{
+              display: 'flex', alignItems: 'flex-start', gap: 11,
+              marginTop: 14, padding: '13px 14px',
+              borderRadius: 'var(--r-md)',
+              background: consentGiven ? 'var(--sage-lt)' : 'var(--bg2)',
+              border: consentGiven
+                ? '1px solid rgba(94,126,104,0.32)'
+                : '1px solid var(--glass-line)',
+              cursor: 'pointer',
+              transition: 'all var(--tr)',
+            }}
+          >
+            <input
+              type="checkbox"
+              checked={consentGiven}
+              onChange={e => {
+                setConsentGiven(e.target.checked);
+                if (e.target.checked) setFormError('');
+              }}
+              style={{
+                width: 18, height: 18, marginTop: 1,
+                accentColor: 'var(--sage)', flexShrink: 0, cursor: 'pointer',
+              }}
+            />
+            <span style={{ fontSize: 12.5, color: 'var(--text)', lineHeight: 1.55 }}>
+              I agree that my prescription photo can be sent to an AI model to read
+              my medications and build my schedule. I understand this is health
+              information.{' '}
+              {/*
+                --text rather than a sage accent: the dark-mode block overrides
+                --text and --text2 but NOT --sage/--sage-dk, so sage text renders
+                dark-on-dark (measured 1.93:1 on this panel). The underline
+                carries the link affordance instead of colour.
+              */}
+              <a
+                href="/privacy.html"
+                target="_blank"
+                rel="noopener noreferrer"
+                onClick={e => e.stopPropagation()}
+                style={{ color: 'var(--text)', fontWeight: 600, textDecoration: 'underline' }}
+              >
+                Privacy Policy
+              </a>
+            </span>
+          </label>
+
           {TURNSTILE_SITE_KEY ? (
             <div style={{
               marginTop: 12,
@@ -1540,25 +1614,56 @@ function HomeScreen({ onUpload }) {
 
       {/* Primary CTA — only when file selected */}
       {files.length > 0 && (
-        <button
-          onClick={handleSubmit}
-          disabled={loading}
-          style={{
-            width: '100%', padding: '16px', borderRadius: 'var(--r-full)',
-            background: loading ? 'var(--text3)' : 'linear-gradient(135deg, var(--sage), var(--sage-dk))',
-            color: '#fff',
-            fontFamily: 'var(--font-head)', fontWeight: 600, fontSize: 16,
-            display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 10,
-            boxShadow: loading ? 'none' : 'var(--sh-btn-sage)',
-            animation: loading ? 'none' : 'pulse-btn 2.6s ease-in-out infinite',
-            transition: 'all var(--tr)',
-            marginBottom: 12,
-          }}
-        >
-          {loading
-            ? <><Spinner size={18} color="#fff" /> Reading prescription…</>
-            : <><Icon name="scan" size={19} strokeWidth={2} /> Read {files.length > 1 ? `${files.length} Pages` : 'My Prescription'}</>}
-        </button>
+        <>
+          <button
+            onClick={handleSubmit}
+            // Gated on consent: reading the prescription is the exact processing
+            // the checkbox authorises, so it must not be startable without it.
+            disabled={loading || !consentGiven}
+            style={{
+              width: '100%', padding: '16px', borderRadius: 'var(--r-full)',
+              background: loading ? 'var(--text3)'
+                : !consentGiven ? 'var(--bg3)'
+                : 'linear-gradient(135deg, var(--sage), var(--sage-dk))',
+              // --text, not --text3 (2.53:1 dark) or --text2 (4.35:1 light): a
+              // user who cannot read the label cannot tell why it is disabled.
+              // WCAG exempts inactive controls, but we hold the 4.5:1 floor
+              // anyway. The disabled state is still unmistakable from the flat
+              // --bg3 fill, the absent shadow, the stopped pulse, and the cursor.
+              color: !loading && !consentGiven ? 'var(--text)' : '#fff',
+              fontFamily: 'var(--font-head)', fontWeight: 600, fontSize: 16,
+              display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 10,
+              boxShadow: loading || !consentGiven ? 'none' : 'var(--sh-btn-sage)',
+              // Don't pulse for attention while the button can't actually be used.
+              animation: loading || !consentGiven ? 'none' : 'pulse-btn 2.6s ease-in-out infinite',
+              cursor: !loading && !consentGiven ? 'not-allowed' : 'pointer',
+              transition: 'all var(--tr)',
+              marginBottom: 10,
+            }}
+          >
+            {loading
+              ? <><Spinner size={18} color="#fff" /> Reading prescription…</>
+              : <><Icon name="scan" size={19} strokeWidth={2} /> Read {files.length > 1 ? `${files.length} Pages` : 'My Prescription'}</>}
+          </button>
+
+          {/*
+            The acceptance moment for the Terms — deliberately next to the button
+            that starts the service, not buried in the footer. Separate from the
+            Article 9 consent checkbox above: that one has to be specific to
+            health data, so the two cannot be merged into a single tick.
+          */}
+          <p style={{
+            fontSize: 11.5, color: 'var(--text2)', lineHeight: 1.5,
+            textAlign: 'center', marginBottom: 12,
+          }}>
+            By tapping Read you agree to our{' '}
+            <a href="/terms.html" target="_blank" rel="noopener noreferrer"
+               style={{ color: 'var(--text)', fontWeight: 600, textDecoration: 'underline' }}>Terms of Service</a>
+            {' '}and{' '}
+            <a href="/privacy.html" target="_blank" rel="noopener noreferrer"
+               style={{ color: 'var(--text)', fontWeight: 600, textDecoration: 'underline' }}>Privacy Policy</a>.
+          </p>
+        </>
       )}
 
       {/* Demo CTA */}

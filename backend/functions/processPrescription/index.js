@@ -27,6 +27,7 @@ const { createHash, createHmac } = require("crypto");
 const {
   MAX_IMAGES,
   validateImageKeys,
+  validateConsent,
   buildDosesToSchedule,
   doseToUtc,
   isDosePast,
@@ -421,6 +422,8 @@ module.exports.handler = async (event, context) => {
       userTimezone,      // IANA timezone string e.g. "Asia/Manila"
       notificationMethod,// "sms" | "email"
       contactInfo,       // phone number (+63...) or email address
+      consent,           // must be boolean true — explicit consent to process health data
+      policyVersion,     // which privacy policy version that consent was given against
     } = body;
 
     // ── Validation ────────────────────────────────────────────────────────
@@ -428,6 +431,13 @@ module.exports.handler = async (event, context) => {
     if (imageKeysError) return errorResponse({ headers, requestId, ...imageKeysError });
     if (!userId)    return errorResponse({ headers, requestId, statusCode: 400, code: CODES.MISSING_USER, message: "userId is required" });
     if (!contactInfo) return errorResponse({ headers, requestId, statusCode: 400, code: CODES.MISSING_CONTACT, message: "contactInfo (phone or email) is required" });
+
+    // Explicit consent is checked before anything is read, stored or charged:
+    // without it there is no lawful basis to process an Article 9 health record
+    // at all, so no image should be fetched and no Bedrock call should be made.
+    const { consentAt, policyVersion: consentedPolicyVersion, error: consentError } =
+      validateConsent({ consent, policyVersion });
+    if (consentError) return errorResponse({ headers, requestId, ...consentError });
 
     const timezone = userTimezone || "Asia/Manila";
     const idempotencyKey = getIdempotencyKey({ uploadId, keys, userId });
@@ -530,6 +540,10 @@ module.exports.handler = async (event, context) => {
         prescription,
         createdAt: now,
         expiresAt,
+        // Evidence of the Article 9 explicit consent this record was created
+        // under. Stored next to the data it authorises so the two cannot drift.
+        consentAt,
+        policyVersion: consentedPolicyVersion,
       },
     }));
     console.log(`[${userId}] Saved prescription ${prescriptionId}`);
@@ -609,6 +623,8 @@ module.exports.handler = async (event, context) => {
         "contactInfo = :contactInfo",
         "updatedAt = :now",
         "expiresAt = :expiresAt",
+        "consentAt = :consentAt",
+        "policyVersion = :policyVersion",
       ].join(", "),
       ExpressionAttributeNames: {
         "#status": "processingStatus",
@@ -626,6 +642,8 @@ module.exports.handler = async (event, context) => {
         ":contactInfo": contactInfo,
         ":now": new Date().toISOString(),
         ":expiresAt": expiresAt,
+        ":consentAt": consentAt,
+        ":policyVersion": consentedPolicyVersion,
       },
     }));
     console.log(`[${userId}] Saved schedule ${scheduleId} with ${scheduledDoses.length} dose reminders`);

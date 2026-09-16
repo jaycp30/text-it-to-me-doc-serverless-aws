@@ -18,6 +18,7 @@ const CODES = Object.freeze({
   TOO_MANY_IMAGES:       "TOO_MANY_IMAGES",       // more than MAX_IMAGES
   MISSING_USER:          "MISSING_USER",          // no userId
   MISSING_CONTACT:       "MISSING_CONTACT",       // no phone/email
+  CONSENT_REQUIRED:      "CONSENT_REQUIRED",      // no explicit consent to process health data
   UNSUPPORTED_FILE:      "UNSUPPORTED_FILE",      // not JPEG/PNG/WebP
   IMAGE_UNREADABLE:      "IMAGE_UNREADABLE",      // Bedrock output unparseable (blurry or not a prescription)
   SCHEDULE_CREATE_FAILED:"SCHEDULE_CREATE_FAILED",// parsed OK but no reminder could be created
