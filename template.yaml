@@ -227,19 +227,68 @@ Resources:
             Path: /upload-url
             Method: POST
 
-  # ── Lambda: process prescription via Bedrock ──────────────────────────────
+  # ── Lambda: /process API handler (fast path) ──────────────────────────────
+  # Validates, claims the idempotency lock, async-invokes the worker, returns
+  # 202. Deliberately holds NO Bedrock, S3 or Scheduler permissions — if this
+  # function ever needs them, the slow work has leaked back onto the request
+  # path. See issue #5.
   ProcessPrescriptionFunction:
     Type: AWS::Serverless::Function
     Properties:
       FunctionName: rx-process-prescription
       Handler: index.handler
       CodeUri: backend/functions/processPrescription/
-      Timeout: 120  # Bedrock can take 30-60s for complex prescriptions
+      # One DynamoDB write plus an async invoke. API Gateway gives up at 30s
+      # anyway, so a larger value here would only ever be dead configuration.
+      Timeout: 10
+      Environment:
+        Variables:
+          WORKER_FUNCTION_ARN: !GetAtt ProcessPrescriptionWorkerFunction.Arn
+          MAGIC_LINK_SECRET:   !Ref MagicLinkSecret
+      Policies:
+        - DynamoDBWritePolicy:
+            TableName: !Ref SchedulesTable
+        - DynamoDBReadPolicy:
+            TableName: !Ref SchedulesTable
+        - LambdaInvokePolicy:
+            FunctionName: !Ref ProcessPrescriptionWorkerFunction
+      Events:
+        Process:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref RxApi
+            Path: /process
+            Method: POST
+
+  # ── Lambda: prescription worker (slow path, async only) ───────────────────
+  # Invoked asynchronously by ProcessPrescriptionFunction. Not wired to any
+  # API route, so nothing can call it synchronously and reintroduce the 30s
+  # ceiling this split exists to escape.
+  ProcessPrescriptionWorkerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: rx-process-prescription-worker
+      Handler: worker.handler
+      CodeUri: backend/functions/processPrescription/
+      # Bedrock needs 30-60s on a busy prescription; 300s leaves generous room
+      # while staying far inside Lambda's 15-minute asynchronous limit. No
+      # Managed Instances and no pricing-model change are required for this.
+      Timeout: 300
+      MemorySize: 1024  # image decode + base64 of up to 5 pages
       Environment:
         Variables:
           NOTIFIER_FUNCTION_ARN: !GetAtt NotifyUserFunction.Arn
           SCHEDULER_ROLE_ARN:    !GetAtt SchedulerRole.Arn
-          MAGIC_LINK_SECRET:     !Ref MagicLinkSecret
+          # No MAGIC_LINK_SECRET: the worker never signs a session token (the
+          # API handler issues it with the 202). Keeping a secret out of a
+          # function that has no use for it keeps its blast radius smaller.
+      # No automatic retries. Lambda retries an async invoke twice by default,
+      # and a retry after a successful Bedrock call pays for that call again —
+      # Bedrock is this stack's main cost risk, which is why /process is
+      # throttled to 1 rps. Failures are written to the record with a stable
+      # code and surfaced to the user, who can retry deliberately.
+      EventInvokeConfig:
+        MaximumRetryAttempts: 0
       Policies:
         - S3ReadPolicy:
             BucketName: !Ref ImagesBucket
@@ -267,13 +316,6 @@ Resources:
         # server-side (instead of the browser calling the public /notify-test).
         - LambdaInvokePolicy:
             FunctionName: !Ref NotifyUserFunction
-      Events:
-        Process:
-          Type: HttpApi
-          Properties:
-            ApiId: !Ref RxApi
-            Path: /process
-            Method: POST
 
   # ── Lambda: send notification (SMS or email) ──────────────────────────────
   # Invoked by EventBridge Scheduler (Option A — per-dose)
@@ -444,6 +486,12 @@ Resources:
     Type: AWS::Logs::LogGroup
     Properties:
       LogGroupName: /aws/lambda/rx-process-prescription
+      RetentionInDays: 30
+
+  ProcessPrescriptionWorkerLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /aws/lambda/rx-process-prescription-worker
       RetentionInDays: 30
 
   NotifyUserLogGroup:
