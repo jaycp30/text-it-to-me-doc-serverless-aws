@@ -61,6 +61,69 @@ function validateImageKeys({ imageKey, imageKeys } = {}) {
 }
 
 /**
+ * Validate the explicit consent flag coming from the request body.
+ *
+ * A prescription image, and the medication data extracted from it, is GDPR
+ * Article 9 "special category" health data. Article 9 processing is prohibited
+ * by default; the exemption this app relies on is 9(2)(a), explicit consent.
+ * That is a higher bar than ordinary consent — it must be an affirmative act,
+ * specific to this processing, and *demonstrable* (Art. 7(1)).
+ *
+ * "Demonstrable" is why this lives on the server. The Read button is disabled
+ * until the box is ticked, but that is a UX affordance: a direct POST to
+ * /process bypasses the UI entirely. The server is the only place consent can
+ * actually be enforced, and the returned consentAt is the record that evidences
+ * it.
+ *
+ * Strict `=== true` on purpose. A truthy value like the string "false", 1, or
+ * "yes" must not satisfy something that has to be a deliberate affirmative act.
+ *
+ * policyVersion is required alongside it so the record says *what* was agreed
+ * to. This adds no compatibility risk: any client sending `consent` is a client
+ * new enough to send the version too, and an older cached client sends neither
+ * and is rejected on the first check — which is the intended behaviour.
+ *
+ * The error carries a stable `code` (kept in sync with processPrescription/errors.js
+ * without importing it, to avoid coupling this pure module to the error catalog).
+ *
+ * @param {{ consent?: unknown, policyVersion?: unknown }} body
+ * @returns {{ consentAt: string | null, policyVersion: string | null, error: { statusCode: number, code: string, message: string, detail?: string } | null }}
+ */
+function validateConsent({ consent, policyVersion } = {}) {
+  if (consent !== true) {
+    return {
+      consentAt: null,
+      policyVersion: null,
+      error: {
+        statusCode: 400,
+        code: "CONSENT_REQUIRED",
+        message: "We need your permission to read your prescription before we can continue.",
+        detail: "consent must be boolean true",
+      },
+    };
+  }
+
+  if (typeof policyVersion !== "string" || !policyVersion.trim()) {
+    return {
+      consentAt: null,
+      policyVersion: null,
+      error: {
+        statusCode: 400,
+        code: "CONSENT_REQUIRED",
+        message: "We need your permission to read your prescription before we can continue.",
+        detail: "policyVersion is required alongside consent",
+      },
+    };
+  }
+
+  return {
+    consentAt: new Date().toISOString(),
+    policyVersion: policyVersion.trim(),
+    error: null,
+  };
+}
+
+/**
  * Expand a single dose entry into one or more DATED dose objects.
  *
  * - A dose that already has a `date` (taper / fixed-with-date) is returned as-is.
@@ -221,6 +284,7 @@ module.exports = {
   MAX_OCCURRENCES_PER_DOSE,
   SCHEDULE_NAME_MAX_LENGTH,
   validateImageKeys,
+  validateConsent,
   expandDoseToDates,
   buildDosesToSchedule,
   doseToUtc,

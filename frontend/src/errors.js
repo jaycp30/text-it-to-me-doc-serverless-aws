@@ -34,6 +34,11 @@ export const ERROR_COPY = {
     body: "A required detail was missing from the request.",
     retry: "Go back, re-enter your details, and try again.",
   },
+  CONSENT_REQUIRED: {
+    title: "We need your permission first",
+    body: "Your prescription is health information, so we can only read it once you agree to it being analysed.",
+    retry: "Go back and tick the permission box, then try again.",
+  },
   MISSING_CONTACT: {
     title: "Missing contact details",
     body: "We need a phone number or email to send reminders to.",

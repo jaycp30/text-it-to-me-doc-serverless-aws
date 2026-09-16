@@ -7,6 +7,7 @@ import {
   DEFAULT_RECURRING_DAYS,
   SCHEDULE_NAME_MAX_LENGTH,
   validateImageKeys,
+  validateConsent,
   expandDoseToDates,
   buildDosesToSchedule,
   isDosePast,
@@ -68,6 +69,65 @@ describe("validateImageKeys — max image validation", () => {
   it("prefers imageKeys over a stray imageKey when both are present", () => {
     const { keys } = validateImageKeys({ imageKey: "legacy.png", imageKeys: ["a.png", "b.png"] });
     expect(keys).toEqual(["a.png", "b.png"]);
+  });
+});
+
+describe("validateConsent — Article 9 explicit consent gate", () => {
+  const EXPECTED_ERROR = {
+    statusCode: 400,
+    code: "CONSENT_REQUIRED",
+    message: "We need your permission to read your prescription before we can continue.",
+  };
+
+  it("rejects a request with no consent field at all", () => {
+    const { consentAt, error } = validateConsent({});
+    expect(consentAt).toBeNull();
+    expect(error).toMatchObject(EXPECTED_ERROR);
+  });
+
+  it("rejects an explicit refusal", () => {
+    const { error } = validateConsent({ consent: false, policyVersion: "2026-09-16" });
+    expect(error).toMatchObject(EXPECTED_ERROR);
+  });
+
+  // The point of the strict === true check: consent has to be an affirmative
+  // act, so anything merely truthy must not stand in for one. The string
+  // "false" is the case that would otherwise pass a loose check and record
+  // consent for a user who refused.
+  it.each([["true"], ["false"], [1], ["yes"], [{}], [[]]])(
+    "rejects the truthy-but-not-true value %p",
+    (value) => {
+      const { consentAt, error } = validateConsent({ consent: value, policyVersion: "2026-09-16" });
+      expect(consentAt).toBeNull();
+      expect(error).toMatchObject(EXPECTED_ERROR);
+    },
+  );
+
+  it("rejects consent given without a policy version", () => {
+    const { error } = validateConsent({ consent: true });
+    expect(error).toMatchObject(EXPECTED_ERROR);
+    expect(error.detail).toMatch(/policyVersion/);
+  });
+
+  it("rejects a blank policy version", () => {
+    const { error } = validateConsent({ consent: true, policyVersion: "   " });
+    expect(error).toMatchObject(EXPECTED_ERROR);
+  });
+
+  it("accepts consent and records when it was given", () => {
+    const { consentAt, policyVersion, error } = validateConsent({
+      consent: true,
+      policyVersion: "2026-09-16",
+    });
+    expect(error).toBeNull();
+    expect(policyVersion).toBe("2026-09-16");
+    // Clock is frozen in beforeAll, so this is exact rather than approximate.
+    expect(consentAt).toBe(FROZEN_NOW.toUTC().toISO({ suppressMilliseconds: false }));
+  });
+
+  it("trims the policy version before storing it", () => {
+    const { policyVersion } = validateConsent({ consent: true, policyVersion: "  2026-09-16 " });
+    expect(policyVersion).toBe("2026-09-16");
   });
 });
 
