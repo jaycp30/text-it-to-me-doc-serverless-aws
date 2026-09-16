@@ -3,9 +3,17 @@ import Icon from './Icons';
 import { ApiError, classifyError, resolveErrorCopy, UNKNOWN_CODE } from './errors';
 import { deriveConfirmationStatus, canResend, cooldownRemainingMs, RESEND_COOLDOWN_MS } from './confirmation';
 import { SCHEDULE_STATUS, pickCurrentSchedule, summarizeSchedule } from './schedule';
+import {
+  JOB_POLL_INTERVAL_MS,
+  isAsyncJobResponse,
+  findJob,
+  interpretJobRecord,
+  isPollExpired,
+} from './job';
 
-// Client-side ceiling for the /process request. API Gateway caps out around 29s,
-// so we abort a little past that and show a TIMEOUT rather than hang forever.
+// Client-side ceiling for the /process request itself. That call now only
+// validates and queues the job, so it returns in well under a second — this is
+// just a guard against a hung connection. The long wait happens in pollForJob.
 const PROCESS_TIMEOUT_MS = 35000;
 
 /* ─────────────────────────────────────────────────────────────────────────────
@@ -604,6 +612,72 @@ function describeFrequency(med, times) {
   if (times.length === 4) return 'Four times daily';
   if (times.length > 4) return `${times.length} times daily`;
   return med.schedule_type || 'Scheduled';
+}
+
+/**
+ * Poll GET /schedules until this job completes, fails, or the deadline passes.
+ *
+ * Deliberately reuses /schedules rather than adding a status route: the record
+ * already carries processingStatus, processingStage and the failure code, and
+ * the session token comes back on the 202 so polling can start immediately.
+ *
+ * includeInactive=true is required — the record is written with active:false
+ * when the lock is claimed and only flips true on success, so the default
+ * active-only filter would hide the job for its entire lifetime.
+ *
+ * Returns the completed schedule record; throws ApiError on failure or timeout.
+ */
+async function pollForJob({ scheduleId, token, onStage }) {
+  const startedAt = Date.now();
+  let lastStage = null;
+
+  // eslint-disable-next-line no-constant-condition
+  while (true) {
+    if (isPollExpired(startedAt)) {
+      throw new ApiError('TIMEOUT', 'Reading your prescription took longer than expected.', {
+        detail: `No result after ${Math.round((Date.now() - startedAt) / 1000)}s`,
+      });
+    }
+
+    await new Promise(resolve => setTimeout(resolve, JOB_POLL_INTERVAL_MS));
+
+    let payload;
+    try {
+      const res = await fetch(
+        `${API_BASE}/schedules?token=${encodeURIComponent(token)}&includeInactive=true`,
+      );
+      payload = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        // A 401 means the token is bad and will not recover — anything else is
+        // treated as a transient blip and retried until the deadline.
+        if (res.status === 401) {
+          throw new ApiError('PROCESSING_FAILED', 'Your session expired while we were reading your prescription.', {
+            status: 401,
+          });
+        }
+        continue;
+      }
+    } catch (err) {
+      if (err instanceof ApiError) throw err;
+      continue; // network blip — keep trying until the deadline
+    }
+
+    const status = interpretJobRecord(findJob(payload.schedules, scheduleId));
+
+    if (status.state === 'complete') return status.record;
+
+    if (status.state === 'failed') {
+      throw new ApiError(status.code, status.message || 'Could not process prescription', {
+        detail: `Job ${scheduleId} failed`,
+      });
+    }
+
+    // Reflect the worker's real progress instead of guessing from elapsed time.
+    if (status.stage && status.stage !== lastStage) {
+      lastStage = status.stage;
+      onStage?.(status.stage);
+    }
+  }
 }
 
 function normalizePrescriptionResponse(payload) {
@@ -3556,14 +3630,29 @@ export default function App() {
             detail: processPayload.detail,
           });
         }
-        setProcessingStage('finishing');
         if (processPayload.sessionToken) storeSessionToken(processPayload.sessionToken);
-        parsed = normalizePrescriptionResponse(processPayload);
 
-        // NOTE: the subscription confirmation email is now sent server-side by
-        // the ProcessPrescription Lambda (it async-invokes NotifyUser). The
-        // browser no longer calls the public /notify-test endpoint for this, so
-        // that endpoint stays off the critical path and can be locked down.
+        if (isAsyncJobResponse(processPayload)) {
+          // 202: the prescription is being read by the worker. Poll until the
+          // record reports complete or failed. This is what lifts the 30s API
+          // Gateway ceiling — a slow Bedrock read no longer races the request.
+          const record = await pollForJob({
+            scheduleId: processPayload.scheduleId,
+            token: processPayload.sessionToken || getStoredSessionToken(),
+            onStage: setProcessingStage,
+          });
+          parsed = normalizePrescriptionResponse(record);
+        } else {
+          // 200 from the previous synchronous handler, still live until the
+          // backend is deployed. See isAsyncJobResponse for why both are handled.
+          setProcessingStage('finishing');
+          parsed = normalizePrescriptionResponse(processPayload);
+        }
+
+        // NOTE: the subscription confirmation email is sent server-side by the
+        // worker (it async-invokes NotifyUser). The browser no longer calls the
+        // public /notify-test endpoint for this, so that endpoint stays off the
+        // critical path and can be locked down.
 
       } else {
         // No key and no backend — fall back to mock
