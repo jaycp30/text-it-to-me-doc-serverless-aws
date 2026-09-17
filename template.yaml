@@ -468,6 +468,58 @@ Resources:
             Path: /reminders/{userId}
             Method: DELETE
 
+  # ── Lambda: erase everything held about a user ────────────────────────────
+  # DELETE /data/{userId} — GDPR Art. 17. Deliberately a separate function from
+  # CancelReminders, which is reachable one click from every email we send:
+  # keeping them apart is what keeps s3:DeleteObject off that path.
+  DeleteUserDataFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: rx-delete-user-data
+      Handler: index.handler
+      CodeUri: backend/functions/deleteUserData/
+      # HttpApi caps an integration at 30s. Returning at 29 gives the caller a
+      # real error message instead of an opaque API Gateway 504.
+      Timeout: 29
+      Environment:
+        Variables:
+          MAGIC_LINK_SECRET: !Ref MagicLinkSecret
+      Policies:
+        # Explicit statements rather than the DynamoDBCrudPolicy canned policy:
+        # erasure needs to read and delete, never to write a new item.
+        - Statement:
+            - Effect: Allow
+              Action:
+                - dynamodb:Query
+                - dynamodb:DeleteItem
+                - dynamodb:BatchWriteItem
+              Resource:
+                - !GetAtt SchedulesTable.Arn
+                - !GetAtt PrescriptionsTable.Arn
+            # ListBucket is on the bucket, DeleteObject on the keys inside it —
+            # two different resource ARNs, and a common cause of a delete that
+            # lists nothing and silently succeeds.
+            - Effect: Allow
+              Action: s3:ListBucket
+              Resource: !GetAtt ImagesBucket.Arn
+            # Cannot be narrowed to one user's prefix: the prefix is per-request
+            # and an IAM policy is static. The handler enforces the boundary by
+            # only ever listing under the token-verified userId.
+            - Effect: Allow
+              Action: s3:DeleteObject
+              Resource: !Sub "${ImagesBucket.Arn}/*"
+            # Scoped to this app's schedule group rather than "*".
+            - Effect: Allow
+              Action: scheduler:DeleteSchedule
+              Resource: !Sub "arn:${AWS::Partition}:scheduler:${AWS::Region}:${AWS::AccountId}:schedule/rx-medication-reminders/*"
+      Events:
+        Delete:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref RxApi
+            Path: /data/{userId}
+            Method: DELETE
+
   # ── Lambda: get user's active schedules ───────────────────────────────────
   GetSchedulesFunction:
     Type: AWS::Serverless::Function
@@ -561,6 +613,15 @@ Resources:
     Type: AWS::Logs::LogGroup
     Properties:
       LogGroupName: /aws/lambda/rx-cancel-reminders
+      RetentionInDays: 30
+
+  # This group is the entire audit trail for erasure — the handler logs the user
+  # id and per-store counts, nothing else. A permanent "user X was erased" record
+  # would mean keeping an identifier to prove we stopped keeping identifiers.
+  DeleteUserDataLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /aws/lambda/rx-delete-user-data
       RetentionInDays: 30
 
   GetSchedulesLogGroup:

@@ -10,6 +10,13 @@ import {
   interpretJobRecord,
   isPollExpired,
 } from './job';
+import {
+  LOCAL_STORAGE_KEYS,
+  ERASURE_CONFIRM_PHRASE,
+  canConfirmErasure,
+  parseErasureRequest,
+  summarizeErasure,
+} from './erasure';
 
 // Client-side ceiling for the /process request itself. That call now only
 // validates and queues the job, so it returns in well under a second — this is
@@ -312,7 +319,7 @@ const GITHUB_URL  = 'https://github.com/jaycp30/text-it-to-me-doc-serverless-aws
 // and stored beside the record, so consent evidence says *what* was agreed to.
 // Bump this to match the "Last updated" date whenever public/privacy.html
 // changes in a way that affects how health data is handled.
-const POLICY_VERSION = '2026-09-16';
+const POLICY_VERSION = '2026-09-17';
 const MAX_UPLOAD_IMAGES = 5;
 
 const PROCESSING_STAGES = {
@@ -534,6 +541,18 @@ function getStoredSessionToken() {
 
 function storeSessionToken(token) {
   try { if (token) localStorage.setItem('rxreader.sessionToken', token); } catch { /* ignore */ }
+}
+
+/**
+ * Wipe every key the app keeps in the browser. Called after a successful
+ * erasure: rxreader.reminderDetails holds the email address or phone number, so
+ * leaving it behind would mean "delete my data" left PII sitting on the device
+ * it is most likely to be read from.
+ */
+function clearLocalData() {
+  for (const key of LOCAL_STORAGE_KEYS) {
+    try { localStorage.removeItem(key); } catch { /* storage blocked — nothing to clear */ }
+  }
 }
 
 function getStoredReminderDetails() {
@@ -1983,7 +2002,7 @@ function ProcessingErrorScreen({ failure, onTryAgain }) {
   );
 }
 
-function CancelledScheduleScreen({ schedule, onNewUpload }) {
+function CancelledScheduleScreen({ schedule, onNewUpload, onRequestDelete }) {
   const meds = schedule?.medications || schedule?.prescription?.medications || [];
   const cancelledAt = schedule?.cancelledAt
     ? new Date(schedule.cancelledAt).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' })
@@ -2063,6 +2082,15 @@ function CancelledScheduleScreen({ schedule, onNewUpload }) {
         >
           <Icon name="camera" size={18} strokeWidth={2} /> Upload a new prescription
         </button>
+
+        {/* Cancelling stopped the reminders; it did not delete anything. This is
+            the screen where someone is most likely to assume otherwise, so the
+            real erasure route belongs here. */}
+        {onRequestDelete && (
+          <div style={{ display: 'flex', justifyContent: 'center', marginTop: 4 }}>
+            <DeleteDataLink onClick={onRequestDelete} />
+          </div>
+        )}
       </div>
     </div>
   );
@@ -2627,7 +2655,243 @@ function MetaRow({ label, value }) {
   );
 }
 
-function ScheduleManagement({ onReplace }) {
+/* ─────────────────────────────────────────────────────────────────────────────
+   DELETE MY DATA — GDPR Art. 17 erasure
+   Irreversible, so it is always behind an explicit confirmation: never fired
+   from a URL on page load the way ?unsubscribe= is. Pure logic (confirm phrase,
+   link parsing, result wording) lives in erasure.js and is unit-tested.
+
+   Colour note: --danger is not overridden for dark mode, where it lands at
+   4.32:1 on the card background — under the 4.5:1 floor. So red is used only
+   for the border and icon (non-text, 3:1 applies) and never for body copy.
+───────────────────────────────────────────────────────────────────────────── */
+function DeleteDataDialog({ userId, token, onClose, onDeleted }) {
+  const [typed, setTyped]       = useState('');
+  const [deleting, setDeleting] = useState(false);
+  const [error, setError]       = useState('');
+  const [result, setResult]     = useState(null);   // summary string once done
+  const inputRef = useRef(null);
+
+  const armed = canConfirmErasure(typed) && !deleting;
+
+  useEffect(() => {
+    inputRef.current?.focus();
+    const onKey = (e) => { if (e.key === 'Escape' && !deleting) onClose(); };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [onClose, deleting]);
+
+  async function handleDelete() {
+    if (!armed) return;
+
+    if (!API_BASE || !token) {
+      setError('No valid session was found. Open the app from a recent reminder email, or email us to request deletion.');
+      return;
+    }
+
+    setDeleting(true); setError('');
+    try {
+      const url = `${API_BASE}/data/${encodeURIComponent(userId)}?token=${encodeURIComponent(token)}`;
+      const res = await fetch(url, { method: 'DELETE' });
+      const data = await res.json().catch(() => ({}));
+
+      // A partial erasure returns 500 with counts. Surfacing that honestly is
+      // the whole point of this issue — the bug being fixed was an app that
+      // said "done" while four stores still held the data.
+      if (!res.ok) throw new Error(data.error || 'Your data could not be deleted. Please try again.');
+
+      clearLocalData();
+      setResult(summarizeErasure(data.counts));
+    } catch (err) {
+      setError(err.message || 'Your data could not be deleted. Please try again.');
+    } finally {
+      setDeleting(false);
+    }
+  }
+
+  return (
+    <>
+      {/* The backdrop is also the centring container. Centring the panel with
+          `transform: translate(-50%,-50%)` does NOT work here: .anim-fade-up
+          animates transform with fill-mode `both`, and an animation's value
+          beats an inline style, so the panel would silently sit off-centre. */}
+      <div
+        className="anim-fade-in"
+        onClick={(e) => { if (e.target === e.currentTarget && !deleting) onClose(); }}
+        style={{
+          position: 'fixed', inset: 0, zIndex: 200,
+          background: 'rgba(26, 24, 37, 0.55)',
+          backdropFilter: 'blur(4px)', WebkitBackdropFilter: 'blur(4px)',
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          padding: 16,
+        }}
+      >
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="delete-data-title"
+        className="anim-fade-up"
+        style={{
+          width: '100%', maxWidth: 440,
+          maxHeight: '86dvh', overflowY: 'auto',
+          borderRadius: 'var(--r-xl)', padding: '24px 22px',
+          background: 'var(--bg)',
+          border: '1px solid rgba(232,92,92,0.34)',
+          boxShadow: 'var(--sh-draw)',
+        }}
+      >
+        {result ? (
+          <>
+            <p id="delete-data-title" style={{
+              fontFamily: 'var(--font-head)', fontWeight: 700, fontSize: 20,
+              color: 'var(--text)', marginBottom: 10,
+            }}>
+              Your data is deleted
+            </p>
+            <p style={{ fontSize: 14, color: 'var(--text)', lineHeight: 1.65, marginBottom: 8 }}>
+              {result}
+            </p>
+            <p style={{ fontSize: 13, color: 'var(--text2)', lineHeight: 1.6, marginBottom: 20 }}>
+              Nothing about you is left in the app. You can upload a new prescription any time — it will start a fresh record.
+            </p>
+            <button
+              onClick={onDeleted}
+              style={{
+                width: '100%', padding: '13px', borderRadius: 'var(--r-full)',
+                background: 'var(--bg2)', color: 'var(--text)',
+                fontFamily: 'var(--font-head)', fontWeight: 600, fontSize: 15,
+              }}
+            >
+              Back to start
+            </button>
+          </>
+        ) : (
+          <>
+            <div className="icon-well" style={{
+              width: 48, height: 48, borderRadius: 'var(--r-lg)',
+              background: 'var(--danger-lt)', color: 'var(--danger)', marginBottom: 14,
+            }} aria-hidden="true"><Icon name="alert" size={23} strokeWidth={2} /></div>
+
+            <p id="delete-data-title" style={{
+              fontFamily: 'var(--font-head)', fontWeight: 700, fontSize: 20,
+              color: 'var(--text)', marginBottom: 10,
+            }}>
+              Delete all your data?
+            </p>
+            <p style={{ fontSize: 14, color: 'var(--text)', lineHeight: 1.65, marginBottom: 12 }}>
+              This permanently removes everything RxReader holds about you:
+            </p>
+
+            <ul style={{
+              listStyle: 'none', display: 'flex', flexDirection: 'column', gap: 7,
+              fontSize: 13.5, color: 'var(--text)', lineHeight: 1.5,
+              background: 'var(--danger-lt)', border: '1px solid rgba(232,92,92,0.22)',
+              borderRadius: 'var(--r-lg)', padding: '14px 16px', marginBottom: 14,
+            }}>
+              <li>Your prescription photographs</li>
+              <li>The medications and doses read from them</li>
+              <li>Your email address or phone number</li>
+              <li>Every upcoming reminder</li>
+            </ul>
+
+            <p style={{ fontSize: 13, color: 'var(--text2)', lineHeight: 1.6, marginBottom: 16 }}>
+              It cannot be undone, and we cannot recover it afterwards. Cancelling reminders
+              instead leaves your schedule in place so you can restart it.
+            </p>
+
+            <label
+              htmlFor="delete-confirm"
+              style={{ display: 'block', fontSize: 13, color: 'var(--text)', fontWeight: 600, marginBottom: 7 }}
+            >
+              Type {ERASURE_CONFIRM_PHRASE} to confirm
+            </label>
+            <input
+              id="delete-confirm"
+              ref={inputRef}
+              type="text"
+              value={typed}
+              disabled={deleting}
+              onChange={(e) => setTyped(e.target.value)}
+              autoComplete="off"
+              autoCapitalize="characters"
+              aria-describedby="delete-confirm-hint"
+              style={{
+                width: '100%', padding: '12px 14px', marginBottom: 6,
+                borderRadius: 'var(--r-md)', border: '1px solid var(--glass-line)',
+                background: 'var(--bg2)', color: 'var(--text)',
+                fontFamily: 'var(--font-body)', fontSize: 15,
+              }}
+            />
+            <p id="delete-confirm-hint" style={{ fontSize: 12, color: 'var(--text2)', marginBottom: 16 }}>
+              The button stays disabled until this matches.
+            </p>
+
+            {error && (
+              <p role="alert" style={{ fontSize: 13, color: 'var(--text)', background: 'var(--danger-lt)',
+                border: '1px solid rgba(232,92,92,0.22)', borderRadius: 'var(--r-md)',
+                padding: '10px 12px', lineHeight: 1.55, marginBottom: 14 }}>
+                {error}
+              </p>
+            )}
+
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+              <button
+                onClick={handleDelete}
+                disabled={!armed}
+                style={{
+                  width: '100%', padding: '13px', borderRadius: 'var(--r-full)',
+                  // Disabled controls are exempt from the contrast rule, but
+                  // this is the primary action's resting state — it has to stay
+                  // readable. --text3 on --bg3 measures 1.9:1; this pair is 4.8:1.
+                  background: armed ? 'var(--danger-lt)' : 'var(--bg2)',
+                  color: armed ? 'var(--text)' : 'var(--text2)',
+                  border: armed ? '1px solid rgba(232,92,92,0.45)' : '1px solid transparent',
+                  fontFamily: 'var(--font-head)', fontWeight: 600, fontSize: 15,
+                  cursor: armed ? 'pointer' : 'not-allowed',
+                }}
+              >
+                {deleting ? 'Deleting…' : 'Delete everything permanently'}
+              </button>
+              <button
+                onClick={onClose}
+                disabled={deleting}
+                style={{
+                  width: '100%', padding: '13px', borderRadius: 'var(--r-full)',
+                  background: 'var(--bg2)', color: 'var(--text)',
+                  fontFamily: 'var(--font-head)', fontWeight: 600, fontSize: 15,
+                }}
+              >
+                Keep my data
+              </button>
+            </div>
+          </>
+        )}
+      </div>
+      </div>
+    </>
+  );
+}
+
+/**
+ * The quiet entry point to erasure. Deliberately understated — a destructive
+ * action should be findable, not tempting.
+ */
+function DeleteDataLink({ onClick }) {
+  return (
+    <button
+      onClick={onClick}
+      style={{
+        background: 'none', border: 'none', padding: '8px 0',
+        color: 'var(--text2)', fontSize: 13, textDecoration: 'underline',
+        cursor: 'pointer', alignSelf: 'center',
+      }}
+    >
+      Delete all my data
+    </button>
+  );
+}
+
+function ScheduleManagement({ onReplace, onRequestDelete }) {
   const details = getStoredReminderDetails();
   const token = getStoredSessionToken();
 
@@ -2759,6 +3023,11 @@ function ScheduleManagement({ onReplace }) {
                 <Icon name="camera" size={17} strokeWidth={2} />
                 {isActive ? 'Replace with a new prescription' : 'Upload a new prescription'}
               </button>
+
+              {/* Erasure is offered whatever the schedule's state: someone who
+                  cancelled reminders months ago still has every prescription
+                  image and their contact details held server-side. */}
+              {onRequestDelete && <DeleteDataLink onClick={onRequestDelete} />}
             </div>
 
             {actionMsg && (
@@ -2777,7 +3046,7 @@ function ScheduleManagement({ onReplace }) {
   );
 }
 
-function ScheduleScreen({ rx, tab, setTab, showTabBar = true, onReplace }) {
+function ScheduleScreen({ rx, tab, setTab, showTabBar = true, onReplace, onRequestDelete }) {
   const [scheduleStartDate, setScheduleStartDate] = useState(() => defaultScheduleStartDate(rx));
   const [doses, setDoses] = useState(() => buildDosesForDate(rx, new Date(), defaultScheduleStartDate(rx)));
 
@@ -2983,7 +3252,7 @@ function ScheduleScreen({ rx, tab, setTab, showTabBar = true, onReplace }) {
         )}
 
         {tab === 'manage' && (
-          <ScheduleManagement onReplace={onReplace} />
+          <ScheduleManagement onReplace={onReplace} onRequestDelete={onRequestDelete} />
         )}
       </div>
     </div>
@@ -3418,7 +3687,45 @@ export default function App() {
   const [tab,    setTab]    = useState('today');    // schedule tab, lifted so sidebar can drive it
   const [unsubscribeBanner, setUnsubscribeBanner] = useState(null); // null | 'loading' | 'done' | 'error'
   const [restoring, setRestoring] = useState(false);
+  // { userId, token } while the erasure dialog is open; null otherwise.
+  const [erasureRequest, setErasureRequest] = useState(null);
   const isDesktop = useIsDesktop();
+
+  // Open the erasure dialog for the current browser session.
+  function requestErasure() {
+    setErasureRequest({
+      userId: getStoredReminderDetails().userId,
+      token: getStoredSessionToken(),
+    });
+  }
+
+  // After a successful erasure there is nothing left to show, so drop all
+  // in-memory state and return to a blank home screen. clearLocalData() has
+  // already run inside the dialog.
+  function handleErased() {
+    setErasureRequest(null);
+    setRx(null);
+    setCancelledSchedule(null);
+    setProcessingError(null);
+    setChatOpen(false);
+    setTab('today');
+    setScreen('home');
+  }
+
+  // Handle ?delete=userId&token=T arriving from the email footer link.
+  //
+  // Unlike ?unsubscribe= below, this deliberately does NOT act — it only opens
+  // the confirmation dialog. Mail clients and security scanners prefetch links,
+  // and an auto-firing erasure link would let a prefetch irreversibly destroy
+  // someone's prescription data before they had read a word of the page.
+  useEffect(() => {
+    const request = parseErasureRequest(window.location.search);
+    if (!request) return;
+
+    window.history.replaceState({}, '', window.location.pathname);
+    if (request.token) storeSessionToken(request.token);
+    setErasureRequest({ userId: request.userId, token: request.token || getStoredSessionToken() });
+  }, []);
 
   // Handle ?unsubscribe=userId&token=T arriving from email footer link
   useEffect(() => {
@@ -3745,7 +4052,7 @@ export default function App() {
       {screen === 'home'        && <HomeScreen onUpload={handleUpload} />}
       {screen === 'processing'  && <ProcessingScreen stage={processingStage} startedAt={processingStartedAt} />}
       {screen === 'error'       && <ProcessingErrorScreen failure={processingError} onTryAgain={handleBack} />}
-      {screen === 'cancelled'   && <CancelledScheduleScreen schedule={cancelledSchedule} onNewUpload={handleBack} />}
+      {screen === 'cancelled'   && <CancelledScheduleScreen schedule={cancelledSchedule} onNewUpload={handleBack} onRequestDelete={requestErasure} />}
       {screen === 'invalidLink' && <InvalidLinkScreen onNewUpload={handleBack} />}
       {screen === 'schedule'   && (
         <ScheduleScreen
@@ -3754,6 +4061,16 @@ export default function App() {
           setTab={setTab}
           showTabBar={!isDesktop}
           onReplace={handleBack}
+          onRequestDelete={requestErasure}
+        />
+      )}
+
+      {erasureRequest && (
+        <DeleteDataDialog
+          userId={erasureRequest.userId}
+          token={erasureRequest.token}
+          onClose={() => setErasureRequest(null)}
+          onDeleted={handleErased}
         />
       )}
     </>
