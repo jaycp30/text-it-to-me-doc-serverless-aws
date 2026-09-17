@@ -3585,12 +3585,24 @@ export default function App() {
         const uploadId = `rx-upload-${globalThis.crypto?.randomUUID ? globalThis.crypto.randomUUID() : Date.now()}`;
 
         setProcessingStage('uploading');
-        const uploaded = await Promise.all(files.map(async (file, index) => {
+
+        // The identity for this batch, held in a local rather than re-read from
+        // localStorage per page. Two reasons, and the first one is not an edge
+        // case: the page requests below run CONCURRENTLY, so on a first-ever
+        // upload none of them would carry a token, the server would mint a
+        // SEPARATE identity for each, and the pages would land under different
+        // S3 prefixes -- which /process then rejects wholesale as
+        // FOREIGN_IMAGE_KEYS. That would break every multi-page first upload.
+        // Second, localStorage can throw (private browsing) or be cleared
+        // mid-batch, and a local variable is unaffected by either.
+        let batchToken = getStoredSessionToken();
+
+        const uploadPage = async (file, index) => {
           const urlRes = await fetch(`${API_BASE}/upload-url`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
-              sessionToken: getStoredSessionToken() || undefined,
+              sessionToken: batchToken || undefined,
               uploadId,
               pageNumber: index + 1,
               contentType: getFileContentType(file),
@@ -3606,10 +3618,12 @@ export default function App() {
           }
           const { uploadUrl, imageKey } = urlPayload;
 
-          // First page of a first-ever upload comes back with a new identity.
-          // Store it before the next page goes out, so every page in this batch
-          // lands under the same prefix.
-          if (urlPayload.sessionToken) storeSessionToken(urlPayload.sessionToken);
+          // A first-ever upload comes back with a newly minted identity. Hold it
+          // for the rest of this batch first; persisting is best-effort.
+          if (urlPayload.sessionToken) {
+            batchToken = urlPayload.sessionToken;
+            storeSessionToken(urlPayload.sessionToken);
+          }
           if (urlPayload.userId) storeUserId(urlPayload.userId);
 
           const putRes = await fetch(uploadUrl, {
@@ -3624,7 +3638,16 @@ export default function App() {
           }
 
           return imageKey;
-        }));
+        };
+
+        // Page 1 goes first and alone, because it is what establishes the
+        // identity every later page has to share. Once batchToken is set the
+        // remaining pages can fan out in parallel as before.
+        const firstKey = await uploadPage(files[0], 0);
+        const restKeys = await Promise.all(
+          files.slice(1).map((file, i) => uploadPage(file, i + 1)),
+        );
+        const uploaded = [firstKey, ...restKeys];
 
         setProcessingStage('reading');
         // Abort past the API Gateway ceiling so a slow read surfaces as TIMEOUT.

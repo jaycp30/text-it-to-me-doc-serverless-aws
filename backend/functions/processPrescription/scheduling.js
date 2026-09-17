@@ -14,6 +14,10 @@
 
 const { DateTime } = require("luxon");
 const { randomUUID } = require("crypto");
+// The canonical user-id shape lives with the auth primitive that mints and
+// verifies ids, so this module cannot drift from it. See
+// backend/layers/auth/nodejs/node_modules/rx-session-token/.
+const { isSafeUserId } = require("rx-session-token");
 
 const MAX_IMAGES = 5;
 
@@ -81,8 +85,9 @@ function validateImageKeys({ imageKey, imageKeys } = {}) {
 function validateKeyOwnership(keys, userId) {
   // userId is interpolated into a regex below, so its shape is asserted first.
   // verifySessionToken already guarantees it, but a pure module should not
-  // depend on a caller's guarantee to stay injection-free.
-  if (!/^[A-Za-z0-9_-]{1,120}$/.test(String(userId || ""))) {
+  // depend on a caller's guarantee to stay injection-free. Uses the canonical
+  // check rather than a second copy of the pattern, which could drift.
+  if (!isSafeUserId(userId)) {
     return {
       error: {
         statusCode: 403,
