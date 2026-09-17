@@ -1,10 +1,7 @@
 import { describe, it, expect } from "vitest";
-import { createHmac } from "crypto";
 
 import {
-  verifySessionToken,
   collectRuleNames,
-  safeSegment,
   imagePrefixFor,
   chunk,
   toDeleteRequests,
@@ -12,63 +9,24 @@ import {
   collectFailures,
 } from "../functions/deleteUserData/lib.js";
 
-// The originals, imported purely so the equivalence suite at the bottom can
-// prove the copies in deleteUserData/lib.js still behave identically.
-import {
-  verifySessionToken as verifyOriginal,
-  collectRuleNames as collectRuleNamesOriginal,
-} from "../functions/cancelReminders/lib.js";
-
-const SECRET = "test-magic-link-secret";
-
-function signToken(uid, exp, secret = SECRET) {
-  const payload = Buffer.from(JSON.stringify({ uid, exp })).toString("base64url");
-  const sig = createHmac("sha256", secret).update(payload).digest("base64url");
-  return `${payload}.${sig}`;
-}
-
-describe("safeSegment", () => {
-  // Pinned against getUploadUrl/index.js:35-42. If that ever changes, erasure
-  // starts listing a prefix the images were never written under — deleting
-  // nothing while reporting success. These cases are the guard.
-  it("leaves a normal generated user id untouched", () => {
-    expect(safeSegment("local-3f8a9c12-4b5d-4e6f-8a9b-0c1d2e3f4a5b"))
-      .toBe("local-3f8a9c12-4b5d-4e6f-8a9b-0c1d2e3f4a5b");
-  });
-
-  it("rewrites characters that are not alphanumeric, dash or underscore", () => {
-    expect(safeSegment("user.123")).toBe("user-123");
-    expect(safeSegment("user/123")).toBe("user-123");
-    expect(safeSegment("user 123")).toBe("user-123");
-  });
-
-  it("collapses runs of dashes and trims the ends", () => {
-    expect(safeSegment("a...b")).toBe("a-b");
-    expect(safeSegment("-abc-")).toBe("abc");
-  });
-
-  it("truncates at 120 characters", () => {
-    expect(safeSegment("a".repeat(200))).toHaveLength(120);
-  });
-
-  it("handles empty and nullish input", () => {
-    expect(safeSegment("")).toBe("");
-    expect(safeSegment(undefined)).toBe("");
-    expect(safeSegment(null)).toBe("");
-  });
-});
+// The original, imported purely so the equivalence suite at the bottom can prove
+// the remaining copy in deleteUserData/lib.js still behaves identically.
+import { collectRuleNames as collectRuleNamesOriginal } from "../functions/cancelReminders/lib.js";
 
 describe("imagePrefixFor", () => {
   it("scopes to the user's prescriptions folder", () => {
     expect(imagePrefixFor("user-123")).toBe("user-123/prescriptions/");
   });
 
-  it("sanitises the same way getUploadUrl does when it writes the key", () => {
-    // getUploadUrl stores at `${safeSegment(userId)}/prescriptions/...`. An
-    // unsanitised prefix here would list a path nothing was written to, delete
-    // zero objects, and still report success.
-    expect(imagePrefixFor("user.123")).toBe("user-123/prescriptions/");
-    expect(imagePrefixFor("a/b/c")).toBe("a-b-c/prescriptions/");
+  it("interpolates the id RAW, exactly as getUploadUrl writes the key", () => {
+    // getUploadUrl builds `${userId}/prescriptions/...` with no sanitisation,
+    // because every accepted id has already passed USER_ID_PATTERN at the auth
+    // boundary. Sanitising on one side only is the write-vs-search drift that
+    // makes an erasure delete nothing while reporting success.
+    const uid = "u-3f8a9c12-4b5d-4e6f-8a9b-0c1d2e3f4a5b";
+    expect(imagePrefixFor(uid)).toBe(`${uid}/prescriptions/`);
+    expect(imagePrefixFor("local-400dbaf6-f12d-4e1a-a8e5-6ec1624e45ea"))
+      .toBe("local-400dbaf6-f12d-4e1a-a8e5-6ec1624e45ea/prescriptions/");
   });
 
   it("keeps the trailing slash so a prefix cannot match a longer user id", () => {
@@ -188,29 +146,12 @@ describe("collectFailures", () => {
 // verifySessionToken and collectRuleNames are copied from cancelReminders/lib.js
 // because SAM packages each function's CodeUri on its own and a cross-directory
 // require would throw at runtime. These tests fail the moment the two diverge.
-describe("copies stay identical to cancelReminders/lib.js", () => {
-  const now = 1_780_000_000;
-
-  const tokenCases = [
-    ["valid token",                signToken("user-123", now + 1000)],
-    ["expired token",              signToken("user-123", now - 1)],
-    ["wrong secret",               signToken("user-123", now + 1000, "other-secret")],
-    ["tampered signature",         `${signToken("user-123", now + 1000).split(".")[0]}.deadbeef`],
-    ["malformed, no signature",    "not-a-real-token"],
-    ["empty string",               ""],
-    ["three parts",                "a.b.c"],
-    ["payload that is not JSON",   `${Buffer.from("nonsense").toString("base64url")}.x`],
-  ];
-
-  it.each(tokenCases)("verifySessionToken agrees on: %s", (_name, token) => {
-    expect(verifySessionToken(token, SECRET, now)).toEqual(verifyOriginal(token, SECRET, now));
-  });
-
-  it("verifySessionToken agrees when the secret is missing", () => {
-    const token = signToken("user-123", now + 1000);
-    expect(verifySessionToken(token, "", now)).toEqual(verifyOriginal(token, "", now));
-  });
-
+describe("collectRuleNames stays identical to cancelReminders/lib.js", () => {
+  // verifySessionToken used to be copied here too and had its own equivalence
+  // suite. It now lives in the rx-session-token layer, so there is one
+  // implementation and nothing to drift. collectRuleNames is still a copy --
+  // SAM packages each CodeUri alone, and scheduling logic does not belong in an
+  // auth layer -- so this guard remains.
   const scheduleCases = [
     ["no schedules",            []],
     ["undefined",               undefined],
@@ -220,7 +161,7 @@ describe("copies stay identical to cancelReminders/lib.js", () => {
                                  { scheduledDoses: [{ scheduleName: "r2" }, { scheduleName: "r3" }] }]],
   ];
 
-  it.each(scheduleCases)("collectRuleNames agrees on: %s", (_name, schedules) => {
+  it.each(scheduleCases)("agrees on: %s", (_name, schedules) => {
     expect(collectRuleNames(schedules)).toEqual(collectRuleNamesOriginal(schedules));
   });
 });

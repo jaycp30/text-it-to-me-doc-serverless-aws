@@ -478,6 +478,8 @@ Resources:
       FunctionName: rx-delete-user-data
       Handler: index.handler
       CodeUri: backend/functions/deleteUserData/
+      Layers:
+        - !Ref AuthLayer
       # HttpApi caps an integration at 30s. Returning at 29 gives the caller a
       # real error message instead of an opaque API Gateway 504.
       Timeout: 29

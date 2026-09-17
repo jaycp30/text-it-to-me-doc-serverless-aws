@@ -30,11 +30,11 @@ const { DynamoDBDocumentClient, QueryCommand, BatchWriteCommand } = require("@aw
 const { SchedulerClient, DeleteScheduleCommand } = require("@aws-sdk/client-scheduler");
 const { S3Client, ListObjectsV2Command, DeleteObjectsCommand } = require("@aws-sdk/client-s3");
 
-// Everything comes from ./lib — a Lambda only ever ships its own CodeUri
-// directory, so reaching into a sibling function's folder would break at runtime.
-// See the note on verifySessionToken in ./lib.js.
+// One implementation of the auth primitive, shipped as a layer. See
+// backend/layers/auth/nodejs/node_modules/rx-session-token/.
+const { verifySessionToken } = require("rx-session-token");
+// Scheduling/batching helpers stay in this function's own lib.
 const {
-  verifySessionToken,
   collectRuleNames,
   imagePrefixFor,
   chunk,
@@ -71,15 +71,15 @@ const DYNAMO_WRITE_BATCH = 25;
 
 module.exports.handler = async (event) => {
   try {
-    const userId = event.pathParameters?.userId;
-    const token  = event.queryStringParameters?.token;
+    const token = event.queryStringParameters?.token;
 
+    // Identity comes from the token; the {userId} path parameter is ignored, as
+    // on DELETE /reminders/{userId}. Requiring the two to match could only ever
+    // manufacture false 401s — a magic link opened on a device that has never
+    // uploaded holds a valid token but has no cached id of its own. The path
+    // parameter stays for URL shape and logging.
+    const userId = verifySessionToken(token, MAGIC_LINK_SECRET);
     if (!userId) {
-      return respond(400, { error: "userId required" });
-    }
-
-    const tokenUserId = verifySessionToken(token, MAGIC_LINK_SECRET);
-    if (!tokenUserId || tokenUserId !== userId) {
       return respond(401, {
         error: "Invalid or expired session token. Please use a recent email link.",
       });

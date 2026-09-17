@@ -8,49 +8,15 @@
  * by cancelReminders — see backend/tests/deleteUserData.test.js.
  */
 
-const { createHmac } = require("crypto");
-
-/**
- * Verify an HMAC-signed session token. Erasure accepts the same token as
- * cancellation, so this is byte-for-byte the logic in cancelReminders/lib.js.
- *
- * It is COPIED rather than imported, and that is a deployment constraint, not a
- * preference: SAM packages each function's CodeUri directory on its own, so a
- * `require("../cancelReminders/lib")` resolves fine locally, builds green, and
- * then throws "Cannot find module" on the first real invocation in Lambda.
- *
- * The copy is guarded mechanically — backend/tests/deleteUserData.test.js runs
- * both implementations over the same cases and fails if they ever disagree. If a
- * third function needs this, stop copying and move it into a Lambda layer.
- *
- * @param {string} token
- * @param {string} secret        the MagicLink signing secret
- * @param {number} [nowSeconds]  current time in Unix seconds (injectable for tests)
- * @returns {string|null}        the user id if valid and unexpired, else null
- */
-function verifySessionToken(token, secret, nowSeconds = Math.floor(Date.now() / 1000)) {
-  if (!secret || !token) return null;
-  const parts = String(token).split(".");
-  if (parts.length !== 2) return null;
-
-  const [payload, sig] = parts;
-  const expected = createHmac("sha256", secret).update(payload).digest("base64url");
-  if (sig !== expected) return null;
-
-  try {
-    const data = JSON.parse(Buffer.from(payload, "base64url").toString());
-    if (!data.uid || !data.exp) return null;
-    if (nowSeconds > data.exp) return null;
-    return data.uid;
-  } catch {
-    return null;
-  }
-}
-
 /**
  * Collect every EventBridge Scheduler rule name across a user's schedule
- * records. Same reasoning as verifySessionToken above — copied because the
- * function packages alone, and covered by the same equivalence test.
+ * records.
+ *
+ * Still a copy of cancelReminders/lib.js, because SAM packages each function's
+ * CodeUri alone. It stays a copy rather than moving to the auth layer: that
+ * layer holds the session-token primitive, and this is scheduling domain logic
+ * that has no business living there. The equivalence test in
+ * backend/tests/deleteUserData.test.js fails if the two ever diverge.
  *
  * @param {Array<{ scheduledDoses?: Array<{ scheduleName?: string }> }>} schedules
  * @returns {string[]}
@@ -64,43 +30,23 @@ function collectRuleNames(schedules) {
 }
 
 /**
- * Sanitise one S3 key segment.
- *
- * Copied byte-for-byte from getUploadUrl/index.js, which applies it to `userId`
- * before building the object key. Erasure MUST apply exactly the same transform,
- * or it lists a prefix the images were never written under: it would then delete
- * nothing and cheerfully report success, which is the precise failure this whole
- * endpoint exists to eliminate. For a plain UUID the two are identical — the
- * divergence only appears for an id containing characters this rewrites, and the
- * userId format is not validated at the point it is accepted.
- *
- * Copied rather than imported for the same packaging reason as
- * verifySessionToken above, and pinned by tests in deleteUserData.test.js.
- *
- * @param {string} value
- * @returns {string}
- */
-function safeSegment(value) {
-  return String(value || "")
-    .replace(/[^a-zA-Z0-9-_]/g, "-")
-    .replace(/-+/g, "-")
-    .replace(/^-|-$/g, "")
-    .substring(0, 120);
-}
-
-/**
  * The S3 prefix holding every prescription image for a user.
  *
- * getUploadUrl writes keys as
- * `${safeSegment(userId)}/prescriptions/${uploadId}/page-N.ext`, so this prefix
- * covers all of them. The trailing slash matters: without it, `abc/` would also
- * match a hypothetical `abcd/`, and erasure would delete another user's images.
+ * getUploadUrl writes keys as `${userId}/prescriptions/${uploadId}/page-N.ext`
+ * with the RAW userId — deliberately, because every id the system accepts has
+ * already passed USER_ID_PATTERN at the auth boundary and is therefore safe as a
+ * key segment. This function must interpolate it the same way. Sanitising here
+ * (or there, but not both) is precisely the write-vs-search drift that makes an
+ * erasure delete nothing and report success.
  *
- * @param {string} userId
+ * The trailing slash matters too: without it, `abc/` would also match a
+ * hypothetical `abcd/`, and erasure would delete another user's images.
+ *
+ * @param {string} userId  a verified, USER_ID_PATTERN-shaped id
  * @returns {string}
  */
 function imagePrefixFor(userId) {
-  return `${safeSegment(userId)}/prescriptions/`;
+  return `${userId}/prescriptions/`;
 }
 
 /**
@@ -176,9 +122,7 @@ function collectFailures(results) {
 }
 
 module.exports = {
-  verifySessionToken,
   collectRuleNames,
-  safeSegment,
   imagePrefixFor,
   chunk,
   toDeleteRequests,
