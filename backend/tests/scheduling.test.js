@@ -7,6 +7,7 @@ import {
   DEFAULT_RECURRING_DAYS,
   SCHEDULE_NAME_MAX_LENGTH,
   validateImageKeys,
+  validateKeyOwnership,
   validateConsent,
   expandDoseToDates,
   buildDosesToSchedule,
@@ -359,5 +360,48 @@ describe("isTotalScheduleFailure — SCHEDULE_CREATE_FAILED trigger", () => {
 
   it("is false when there was nothing to schedule at all", () => {
     expect(isTotalScheduleFailure(0, 0, 0)).toBe(false);
+  });
+});
+
+describe("validateKeyOwnership — the caller must own the keys they submit", () => {
+  const UID = "u-3f8a9c12-4b5d-4e6f-8a9b-0c1d2e3f4a5b";
+
+  it("accepts keys under the caller's own prefix", () => {
+    const keys = [`${UID}/prescriptions/up1/page-1.jpg`, `${UID}/prescriptions/up1/page-2.jpg`];
+    expect(validateKeyOwnership(keys, UID).error).toBeNull();
+  });
+
+  it("rejects another user's key with 403", () => {
+    // The attack this closes: a caller with a perfectly valid identity of their
+    // own submits someone else's key, and the worker fetches, OCRs and stores
+    // that prescription into the caller's partition. Authenticating the caller
+    // does not prevent it -- the keys have to be checked against whose they are.
+    const keys = [`u-victim-0000/prescriptions/up1/page-1.jpg`];
+    const { error } = validateKeyOwnership(keys, UID);
+    expect(error?.statusCode).toBe(403);
+    expect(error?.code).toBe("FOREIGN_IMAGE_KEYS");
+  });
+
+  it("rejects a batch where only one key is foreign", () => {
+    const keys = [
+      `${UID}/prescriptions/up1/page-1.jpg`,
+      `u-victim-0000/prescriptions/up1/page-1.jpg`,
+    ];
+    expect(validateKeyOwnership(keys, UID).error?.statusCode).toBe(403);
+  });
+
+  it("is not fooled by a prefix that merely starts with the caller's id", () => {
+    // Without the "/prescriptions/" boundary, "u-abc" would also match
+    // "u-abcdef/...", letting one user reach another's objects.
+    expect(validateKeyOwnership(["u-abcdef/prescriptions/up1/page-1.jpg"], "u-abc").error?.statusCode).toBe(403);
+  });
+
+  it("rejects a key trying to escape upward", () => {
+    expect(validateKeyOwnership([`../${UID}/prescriptions/up1/page-1.jpg`], UID).error?.statusCode).toBe(403);
+  });
+
+  it("accepts an empty key list (validateImageKeys already rejected it)", () => {
+    expect(validateKeyOwnership([], UID).error).toBeNull();
+    expect(validateKeyOwnership(undefined, UID).error).toBeNull();
   });
 });

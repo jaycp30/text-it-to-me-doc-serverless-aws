@@ -505,17 +505,27 @@ function getBrowserTimezone() {
   }
 }
 
+/**
+ * Read the identity the SERVER gave us. This is a cache, not a generator.
+ *
+ * It used to mint `local-<uuid>` itself and send that to the backend, which
+ * signed a session token for whatever it was told — so knowing someone's id was
+ * enough to be issued their credentials. Identity now comes from
+ * POST /upload-url and nowhere else.
+ *
+ * The old fallback was worse than it looked: with no crypto.randomUUID (Safari
+ * private mode, non-HTTPS) it produced `local-${Date.now()}`, a millisecond
+ * timestamp that is trivially enumerable.
+ *
+ * Returns null before the first upload, which is correct — there is nothing to
+ * identify yet.
+ */
 function getStoredUserId() {
-  const storageKey = 'rxreader.userId';
-  try {
-    const existing = localStorage.getItem(storageKey);
-    if (existing) return existing;
-    const id = `local-${globalThis.crypto?.randomUUID ? globalThis.crypto.randomUUID() : Date.now()}`;
-    localStorage.setItem(storageKey, id);
-    return id;
-  } catch {
-    return `local-${Date.now()}`;
-  }
+  try { return localStorage.getItem('rxreader.userId') || null; } catch { return null; }
+}
+
+function storeUserId(userId) {
+  try { if (userId) localStorage.setItem('rxreader.userId', userId); } catch { /* ignore */ }
 }
 
 function getStoredSessionToken() {
@@ -1254,7 +1264,6 @@ function HomeScreen({ onUpload }) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           type: 'test',
-          userId: reminderDetails.userId,
           notificationMethod: reminderDetails.notificationMethod,
           contactInfo: reminderDetails.contactInfo.trim(),
           turnstileToken,
@@ -2432,7 +2441,7 @@ function UpcomingTab({ rx, scheduleStartDate }) {
    resend over the hardened, Turnstile-gated /notify-test path. Self-contained
    so it doesn't disturb the setup form's Turnstile widget in HomeScreen.
 ───────────────────────────────────────────────────────────────────────────── */
-function ResendConfirmation({ userId, contact, method }) {
+function ResendConfirmation({ contact, method }) {
   const turnstileRef = useRef(null);
   const widgetRef = useRef(null);
   const [token, setToken] = useState('');
@@ -2489,7 +2498,7 @@ function ResendConfirmation({ userId, contact, method }) {
       const res = await fetch(`${API_BASE}/notify-test`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ type: 'test', userId, notificationMethod: method, contactInfo: contact, turnstileToken: token }),
+        body: JSON.stringify({ type: 'test', notificationMethod: method, contactInfo: contact, turnstileToken: token }),
       });
       const payload = await res.json().catch(() => ({}));
       if (!res.ok) {
@@ -2577,7 +2586,7 @@ function ConfirmationBanner({ rx }) {
           ? 'Please resend it below. Reminders are still active either way.'
           : "Didn't get it? Check spam, or resend below."}
       </p>
-      <ResendConfirmation userId={details.userId} contact={contact} method={method} />
+      <ResendConfirmation contact={contact} method={method} />
     </div>
   );
 }
@@ -3558,8 +3567,11 @@ export default function App() {
 
       } else if (!PREVIEW) {
         /* ── Production mode: upload to S3, call backend Lambda ── */
+        // No userId here any more. The server owns identity: POST /upload-url
+        // either recognises our stored token or mints a fresh identity and hands
+        // it back. Sending a userId we chose ourselves is exactly what let
+        // anyone who knew someone else's id be issued a token for them.
         const uploadContext = {
-          userId: reminderDetails.userId,
           userTimezone: reminderDetails.userTimezone,
           notificationMethod: reminderDetails.notificationMethod,
           contactInfo: reminderDetails.contactInfo,
@@ -3572,7 +3584,7 @@ export default function App() {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
-              userId: uploadContext.userId,
+              sessionToken: getStoredSessionToken() || undefined,
               uploadId,
               pageNumber: index + 1,
               contentType: getFileContentType(file),
@@ -3587,6 +3599,12 @@ export default function App() {
             });
           }
           const { uploadUrl, imageKey } = urlPayload;
+
+          // First page of a first-ever upload comes back with a new identity.
+          // Store it before the next page goes out, so every page in this batch
+          // lands under the same prefix.
+          if (urlPayload.sessionToken) storeSessionToken(urlPayload.sessionToken);
+          if (urlPayload.userId) storeUserId(urlPayload.userId);
 
           const putRes = await fetch(uploadUrl, {
             method: 'PUT', body: file,
@@ -3615,6 +3633,8 @@ export default function App() {
               imageKey: uploaded[0],
               imageKeys: uploaded,
               uploadId,
+              // Identity, proven rather than asserted.
+              sessionToken: getStoredSessionToken(),
               ...uploadContext,
             }),
             signal: procController.signal,
@@ -3630,7 +3650,6 @@ export default function App() {
             detail: processPayload.detail,
           });
         }
-        if (processPayload.sessionToken) storeSessionToken(processPayload.sessionToken);
 
         if (isAsyncJobResponse(processPayload)) {
           // 202: the prescription is being read by the worker. Poll until the
@@ -3638,7 +3657,7 @@ export default function App() {
           // Gateway ceiling — a slow Bedrock read no longer races the request.
           const record = await pollForJob({
             scheduleId: processPayload.scheduleId,
-            token: processPayload.sessionToken || getStoredSessionToken(),
+            token: getStoredSessionToken(),
             onStage: setProcessingStage,
           });
           parsed = normalizePrescriptionResponse(record);

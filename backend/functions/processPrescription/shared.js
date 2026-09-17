@@ -19,13 +19,10 @@
 const { DynamoDBClient } = require("@aws-sdk/client-dynamodb");
 const { DynamoDBDocumentClient, GetCommand, UpdateCommand } = require("@aws-sdk/lib-dynamodb");
 const { createHash } = require("crypto");
-// One implementation of the auth primitive, shipped as a layer. See
-// backend/layers/auth/nodejs/node_modules/rx-session-token/.
-const { signSessionToken: signToken } = require("rx-session-token");
 
 const dynamo = DynamoDBDocumentClient.from(new DynamoDBClient({}));
 
-const { SCHEDULES_TABLE, MAGIC_LINK_SECRET } = process.env;
+const { SCHEDULES_TABLE } = process.env;
 
 // Stages the worker reports as it progresses, mirroring the frontend's
 // PROCESSING_STAGE_ORDER. The frontend previously guessed the stage from
@@ -36,13 +33,10 @@ const STAGES = Object.freeze({
   FINISHING:  "finishing",
 });
 
-// ─── Session token signing ────────────────────────────────────────────────────
-
-// Thin wrapper keeping this module's existing one-argument call sites working;
-// the secret comes from the environment here rather than from the caller.
-function signSessionToken(userId) {
-  return signToken(userId, MAGIC_LINK_SECRET);
-}
+// Session tokens are no longer signed anywhere in this function. Identity is
+// minted once, in getUploadUrl, and /process only ever verifies. Re-issuing a
+// token on each call would silently turn a 90-day credential into a permanent
+// one for anyone holding a stolen token.
 
 // ─── TTL helper ───────────────────────────────────────────────────────────────
 // DynamoDB TTL is Unix timestamp (seconds)
@@ -141,7 +135,6 @@ function responseFromCompletedSchedule(schedule, headers, replay = false, confir
   const medications = schedule.prescription?.medications || schedule.medications || [];
   const scheduledDoses = schedule.scheduledDoses || [];
   const skippedDoses = schedule.skippedDoses || [];
-  const sessionToken = schedule.userId ? signSessionToken(schedule.userId) : null;
 
   return {
     statusCode: 200,
@@ -150,7 +143,6 @@ function responseFromCompletedSchedule(schedule, headers, replay = false, confir
       idempotentReplay: replay,
       prescriptionId: schedule.prescriptionId,
       scheduleId: schedule.scheduleId,
-      sessionToken,
       ...(replay ? { samePrescriptionId: true, sameScheduleId: true } : {}),
       prescription: schedule.prescription || { medications },
       summary: {
@@ -171,7 +163,6 @@ function responseFromCompletedSchedule(schedule, headers, replay = false, confir
 module.exports = {
   dynamo,
   STAGES,
-  signSessionToken,
   ttlOneYear,
   shortHash,
   getIdempotencyKey,

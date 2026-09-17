@@ -61,6 +61,41 @@ function validateImageKeys({ imageKey, imageKeys } = {}) {
 }
 
 /**
+ * Validate that every image key belongs to the caller's own S3 prefix.
+ *
+ * validateImageKeys above only counts keys — it never checked whose they were.
+ * That gap meant a caller with a completely legitimate identity of their own
+ * could pass `<someone-else>/prescriptions/<uploadId>/page-1.jpg` and have the
+ * worker fetch, OCR and store that person's prescription into the caller's
+ * partition. Authenticating the caller does not fix it; the keys have to be
+ * checked against *whose* they are.
+ *
+ * `userId` must already be a verified, USER_ID_PATTERN-shaped id (it comes from
+ * verifySessionToken), which is what makes this prefix byte-identical to the one
+ * getUploadUrl writes under.
+ *
+ * @param {string[]} keys
+ * @param {string} userId  the verified caller
+ * @returns {{ error: { statusCode: number, code: string, message: string } | null }}
+ */
+function validateKeyOwnership(keys, userId) {
+  const prefix = `${userId}/prescriptions/`;
+  const foreign = (keys || []).filter((key) => !String(key).startsWith(prefix));
+
+  if (foreign.length > 0) {
+    return {
+      error: {
+        statusCode: 403,
+        code: "FOREIGN_IMAGE_KEYS",
+        message: "Those uploads do not belong to this session.",
+      },
+    };
+  }
+
+  return { error: null };
+}
+
+/**
  * Validate the explicit consent flag coming from the request body.
  *
  * A prescription image, and the medication data extracted from it, is GDPR
@@ -284,6 +319,7 @@ module.exports = {
   MAX_OCCURRENCES_PER_DOSE,
   SCHEDULE_NAME_MAX_LENGTH,
   validateImageKeys,
+  validateKeyOwnership,
   validateConsent,
   expandDoseToDates,
   buildDosesToSchedule,

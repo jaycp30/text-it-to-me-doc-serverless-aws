@@ -26,7 +26,10 @@ const { LambdaClient, InvokeCommand } = require("@aws-sdk/client-lambda");
 
 // Pure request validation + scheduling logic lives in scheduling.js so it can
 // be unit-tested without AWS. See backend/tests/scheduling.test.js.
-const { validateImageKeys, validateConsent } = require("./scheduling");
+const { validateImageKeys, validateKeyOwnership, validateConsent } = require("./scheduling");
+// One implementation of the auth primitive, shipped as a layer. See
+// backend/layers/auth/nodejs/node_modules/rx-session-token/.
+const { verifySessionToken } = require("rx-session-token");
 
 // Stable error codes + response builder (see backend/tests/errors.test.js). The
 // frontend maps these codes to user-facing copy in frontend/src/errors.js.
@@ -34,7 +37,6 @@ const { CODES, errorResponse } = require("./errors");
 
 const {
   dynamo,
-  signSessionToken,
   ttlOneYear,
   getIdempotencyKey,
   getExistingSchedule,
@@ -45,6 +47,7 @@ const {
 const lambda = new LambdaClient({});
 
 const { SCHEDULES_TABLE, WORKER_FUNCTION_ARN } = process.env;
+const MAGIC_LINK_SECRET = process.env.MAGIC_LINK_SECRET || "";
 
 // ─── Handler ──────────────────────────────────────────────────────────────────
 module.exports.handler = async (event, context) => {
@@ -66,7 +69,7 @@ module.exports.handler = async (event, context) => {
       imageKey,          // S3 key of the uploaded prescription image (legacy single-image path)
       imageKeys,         // S3 keys of uploaded prescription images (multi-page path)
       uploadId,          // shared S3 prefix segment for one prescription upload
-      userId,            // pseudonymous browser-local id (localStorage UUID) — NOT an authenticated subject
+      sessionToken,      // signed token from POST /upload-url — the ONLY source of identity
       userTimezone,      // IANA timezone string e.g. "Asia/Manila"
       notificationMethod,// "sms" | "email"
       contactInfo,       // phone number (+63...) or email address
@@ -77,7 +80,26 @@ module.exports.handler = async (event, context) => {
     // ── Validation ────────────────────────────────────────────────────────
     const { keys, error: imageKeysError } = validateImageKeys({ imageKey, imageKeys });
     if (imageKeysError) return errorResponse({ headers, requestId, ...imageKeysError });
-    if (!userId)    return errorResponse({ headers, requestId, statusCode: 400, code: CODES.MISSING_USER, message: "userId is required" });
+
+    // Identity comes from the signed token and nowhere else. This endpoint used
+    // to take a userId from the body and then SIGN A TOKEN FOR IT, which let
+    // anyone who knew another user's id impersonate them outright.
+    const userId = verifySessionToken(sessionToken, MAGIC_LINK_SECRET);
+    if (!userId) {
+      return errorResponse({
+        headers, requestId, statusCode: 401, code: CODES.INVALID_SESSION,
+        message: "Invalid or expired session. Start a new upload.",
+      });
+    }
+
+    // The keys must live under the caller's own prefix. Without this, a user
+    // with a perfectly valid identity of their own could pass someone else's
+    // key and have the worker read, OCR and store that prescription into their
+    // partition. The prefix is byte-identical to the one getUploadUrl writes:
+    // every accepted uid matches USER_ID_PATTERN, so safeSegment is a no-op.
+    const { error: ownershipError } = validateKeyOwnership(keys, userId);
+    if (ownershipError) return errorResponse({ headers, requestId, ...ownershipError });
+
     if (!contactInfo) return errorResponse({ headers, requestId, statusCode: 400, code: CODES.MISSING_CONTACT, message: "contactInfo (phone or email) is required" });
 
     // Explicit consent is checked before anything is read, stored or charged:
@@ -186,9 +208,8 @@ module.exports.handler = async (event, context) => {
 /**
  * 202 Accepted — the job is queued, not done.
  *
- * `sessionToken` is issued here rather than on completion so the client can
- * start polling GET /schedules immediately. It only encodes the userId, so
- * nothing about it needs the job to have finished.
+ * No session token is returned. The client already holds one from
+ * POST /upload-url, which is now the only place an identity is minted.
  */
 function accepted({ headers, userId, scheduleId, prescriptionId, duplicate = false }) {
   return {
@@ -198,7 +219,6 @@ function accepted({ headers, userId, scheduleId, prescriptionId, duplicate = fal
       status: "processing",
       scheduleId,
       prescriptionId,
-      sessionToken: signSessionToken(userId),
       // True when this request joined a job that was already running, rather
       // than starting one. The client polls identically either way.
       ...(duplicate ? { duplicate: true } : {}),

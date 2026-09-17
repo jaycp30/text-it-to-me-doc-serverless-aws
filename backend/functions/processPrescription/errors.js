@@ -17,6 +17,8 @@ const CODES = Object.freeze({
   MISSING_IMAGES:        "MISSING_IMAGES",        // no imageKey/imageKeys supplied
   TOO_MANY_IMAGES:       "TOO_MANY_IMAGES",       // more than MAX_IMAGES
   MISSING_USER:          "MISSING_USER",          // no userId
+  INVALID_SESSION:       "INVALID_SESSION",       // no valid session token — identity cannot be established
+  FOREIGN_IMAGE_KEYS:    "FOREIGN_IMAGE_KEYS",    // image keys outside the caller's own S3 prefix
   MISSING_CONTACT:       "MISSING_CONTACT",       // no phone/email
   CONSENT_REQUIRED:      "CONSENT_REQUIRED",      // no explicit consent to process health data
   UNSUPPORTED_FILE:      "UNSUPPORTED_FILE",      // not JPEG/PNG/WebP
