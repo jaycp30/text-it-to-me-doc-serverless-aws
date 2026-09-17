@@ -177,7 +177,11 @@ module.exports.handler = async (event) => {
       userTimezone,       // IANA timezone string (subscribed confirmation)
     } = payload;
 
-    if (http && type === "test") {
+    // Human verification gates EVERY public HTTP invocation, not just the ones
+    // that call themselves "test". `type` comes from the request body, so gating
+    // on `type === "test"` meant an attacker sent `type: "subscribed"` and
+    // skipped the check entirely — while still reaching the SES/SNS send below.
+    if (http) {
       const validation = await verifyTurnstileToken(turnstileToken, getRequestIp(event));
       if (!validation.success) {
         console.warn("Turnstile verification failed:", validation["error-codes"]);
@@ -192,21 +196,28 @@ module.exports.handler = async (event) => {
       return response(400, { error: "contactInfo required" }, http);
     }
 
+    // A public HTTP caller can only ever send the fixed test message. `type`
+    // came from the request body and chose the formatter, so `type: "dose"` with
+    // a crafted dose object put attacker-written text through formatDoseMessage
+    // to any phone number or inbox on earth — an open SES/SNS relay on our bill
+    // and our sender reputation. The route is /notify-test; this makes it so.
+    const effectiveType = http ? "test" : type;
+
     const isSMS = notificationMethod === "sms";
-    const isDailySummary = type === "daily_summary" || (doses && doses.length > 0);
+    const isDailySummary = effectiveType === "daily_summary" || (!http && doses && doses.length > 0);
 
     let message, subject;
 
-    if (type === "subscribed") {
+    if (effectiveType === "subscribed") {
       message = formatSubscribedMessage({ medications, dosesScheduled, userTimezone });
       subject = "You're subscribed to RxReader reminders";
-    } else if (type === "test") {
+    } else if (effectiveType === "test") {
       message = formatTestMessage(notificationMethod);
       subject = "Test medication reminder — RxReader";
     } else if (isDailySummary) {
       message = formatDailySummaryMessage(doses);
       subject = "Your medications for today — RxReader";
-    } else if (dose) {
+    } else if (!http && dose) {
       message = formatDoseMessage(dose);
       subject = `Medication reminder: ${dose.medication}`;
     } else {
@@ -217,8 +228,21 @@ module.exports.handler = async (event) => {
     if (isSMS) {
       await sendSMS(contactInfo, message);
     } else {
-      // Pass structured data so buildHtmlEmail can render a richer template
-      await sendEmail(contactInfo, subject, message, { type, dose, doses, medications, dosesScheduled, userTimezone }, userId);
+      // Pass structured data so buildHtmlEmail can render a richer template.
+      //
+      // linkUserId is deliberately NOT the caller's userId on an HTTP call. The
+      // footer links (open my schedule / unsubscribe / delete my data) are all
+      // signed for whatever userId is passed here, and on a public HTTP route
+      // both the userId and the destination address come from the request body.
+      // That let anyone POST {userId: "<victim>", contactInfo: "<attacker>"} and
+      // be mailed working, indefinitely-renewable credentials for that user.
+      //
+      // Scheduler, worker and dailySummary invocations keep their userId,
+      // because there the destination comes from the stored record rather than
+      // from the caller — the links can only reach the person they belong to.
+      // A test send addressed to an arbitrary address needs no links at all.
+      const linkUserId = http ? "" : userId;
+      await sendEmail(contactInfo, subject, message, { type: effectiveType, dose, doses, medications, dosesScheduled, userTimezone }, linkUserId);
     }
 
     console.log(`[${userId}] Notification sent via ${notificationMethod}`);
