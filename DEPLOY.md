@@ -633,6 +633,116 @@ Until those are done, use **demo mode** (the "Try with sample prescription" butt
 
 ---
 
+## One-time migration — server-minted identity + secret rotation
+
+Applies to the deploy that first ships `fix/server-minted-identity`. Read all of
+it before starting; the ordering is the part that bites.
+
+### Why the secret has to rotate
+
+`MagicLinkSecret` is global and unversioned. Until this deploy, `POST /process`
+would sign a session token for whatever `userId` a caller put in the request
+body, and `POST /notify-test` would email signed links for any `userId` to any
+address. Any token minted through either hole stays valid for **90 days** unless
+the signing secret changes. Rotating it invalidates every existing token, which
+is the point.
+
+Generate a new one (48 random bytes, well past the 32-character minimum):
+
+```bash
+openssl rand -base64 48
+```
+
+### The unavoidable break window
+
+The frontend and backend change contract together. The old frontend sends
+`userId` and no `sessionToken`; the new backend requires the opposite. There is
+no ordering that avoids a window where uploads fail:
+
+| Deploy order | What breaks, and for how long |
+|---|---|
+| Backend first | Old frontend cannot upload until Amplify finishes building (~2–4 min) |
+| Frontend first | New frontend gets `400 MISSING_USER` from the old backend for the same window |
+
+Deploy the backend first — it is the fast half, and it fails closed rather than
+minting a stray identity per upload. Existing sessions end either way, because
+the rotation invalidates their tokens; anyone affected simply uploads again.
+
+### Sequence
+
+1. Deploy the backend with the new secret. Every parameter must be passed —
+   `--parameter-overrides` **replaces** saved config, so an omitted `AppUrl`
+   silently resets to `https://localhost:5173` and cuts the live site off from
+   its own API while still reporting `UPDATE_COMPLETE`.
+
+```bash
+sam build
+sam package --resolve-s3 --output-template-file /tmp/packaged.yaml --region ap-northeast-1
+```
+
+Then, substituting the value you generated above for `<new-secret>`:
+
+```bash
+aws cloudformation update-stack --stack-name text-it-to-me-doc --region ap-northeast-1 \
+  --template-body file:///tmp/packaged.yaml \
+  --capabilities CAPABILITY_IAM CAPABILITY_NAMED_IAM CAPABILITY_AUTO_EXPAND \
+  --parameters ParameterKey=BedrockModelId,ParameterValue=jp.anthropic.claude-sonnet-4-6 \
+    ParameterKey=SesFromEmail,ParameterValue=noreply@jaycloud.net \
+    ParameterKey=AppUrl,ParameterValue=https://textit2medoc.jaycloud.net \
+    ParameterKey=TurnstileSecretKey,UsePreviousValue=true \
+    ParameterKey=MagicLinkSecret,ParameterValue='<new-secret>'
+```
+
+2. Wait for the stack to settle before pushing the frontend:
+
+```bash
+aws cloudformation wait stack-update-complete --stack-name text-it-to-me-doc --region ap-northeast-1
+```
+
+3. Merge to `main`, which triggers the Amplify build and closes the window.
+
+### Verify
+
+`AppUrl` survived (this is the one that takes the site down silently):
+
+```bash
+aws cloudformation describe-stacks --stack-name text-it-to-me-doc --region ap-northeast-1 \
+  --query "Stacks[0].Parameters[?ParameterKey=='AppUrl'].ParameterValue" --output text
+```
+
+The layer is attached to all six functions that need it — anything missing it
+throws `Cannot find module 'rx-session-token'` on cold start, not at deploy:
+
+```bash
+for fn in rx-get-upload-url rx-process-prescription rx-process-prescription-worker rx-notify-user rx-cancel-reminders rx-get-schedules; do
+  aws lambda get-function-configuration --function-name "$fn" --region ap-northeast-1 \
+    --query "{fn:FunctionName,layers:Layers[].Arn}" --output text
+done
+```
+
+`/process` refuses an unauthenticated call — the actual vulnerability, gone:
+
+```bash
+API="https://dr4auuv5p7.execute-api.ap-northeast-1.amazonaws.com/v1"
+curl -s -o /dev/null -w '%{http_code}\n' -X POST "$API/process" \
+  -H "Content-Type: application/json" \
+  -d '{"imageKeys":["someone-else/prescriptions/x/page-1.jpg"],"userId":"local-400dbaf6-f12d-4e1a-a8e5-6ec1624e45ea","contactInfo":"a@b.com","consent":true,"policyVersion":"2026-09-17"}'
+```
+
+`401` is the pass. A `202` means the old code is still live.
+
+`/notify-test` refuses to send without human verification:
+
+```bash
+curl -s -o /dev/null -w '%{http_code}\n' -X POST "$API/notify-test" \
+  -H "Content-Type: application/json" \
+  -d '{"type":"subscribed","userId":"local-400dbaf6-f12d-4e1a-a8e5-6ec1624e45ea","notificationMethod":"email","contactInfo":"attacker@example.com"}'
+```
+
+`403` is the pass. A `200` means `type` is still steering around Turnstile.
+
+---
+
 ## Teardown (if you want to remove everything)
 
 ```bash
