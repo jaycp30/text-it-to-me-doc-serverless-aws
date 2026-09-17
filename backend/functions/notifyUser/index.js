@@ -38,6 +38,12 @@ const RESPONSE_HEADERS = {
   "Access-Control-Allow-Origin": "*",
 };
 
+// SECURITY-CRITICAL. Two protections below key off this: Turnstile only runs
+// when it is true, and the footer links are only suppressed when it is true.
+// `requestContext.http` exists because RxApi is an AWS::Serverless::HttpApi
+// (payload format v2). Converting it to a REST AWS::Serverless::Api would
+// remove that field, make this return false for real public requests, and
+// silently switch BOTH protections off with no test or deploy failure.
 function isHttpEvent(event) {
   return Boolean(event?.requestContext?.http);
 }

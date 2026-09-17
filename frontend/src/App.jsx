@@ -3476,6 +3476,12 @@ export default function App() {
         const schedules = (data.schedules || []).filter(s => (s.medications || []).length > 0);
         if (schedules.length === 0) return;
 
+        // A magic link can restore a session on a device that has never
+        // uploaded, so this is the only place that device learns its own id.
+        // Without it getStoredUserId() stays null and every later call that
+        // interpolates it builds a URL ending in /null.
+        if (schedules[0]?.userId) storeUserId(schedules[0].userId);
+
         const sorted = [...schedules].sort((a, b) =>
           (b.updatedAt || b.createdAt || '').localeCompare(a.updatedAt || a.createdAt || ''));
         const latestActive = sorted.find(s => s.active);

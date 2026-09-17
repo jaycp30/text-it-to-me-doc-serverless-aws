@@ -34,15 +34,16 @@ const HEADERS = {
 
 module.exports.handler = async (event) => {
   try {
-    const userId = event.pathParameters?.userId;
-    const token  = event.queryStringParameters?.token;
+    const token = event.queryStringParameters?.token;
 
+    // Identity comes from the token, and the {userId} path parameter is ignored.
+    // It used to have to match, which could only ever manufacture false 401s:
+    // the token is the thing that proves anything, and a client that holds a
+    // valid one but has not cached its own id — a magic link opened on a second
+    // device — was told "please use a recent email link" while holding exactly
+    // that. The path parameter stays in the route for URL shape and logging.
+    const userId = verifySessionToken(token, MAGIC_LINK_SECRET);
     if (!userId) {
-      return { statusCode: 400, headers: HEADERS, body: JSON.stringify({ error: "userId required" }) };
-    }
-
-    const tokenUserId = verifySessionToken(token, MAGIC_LINK_SECRET);
-    if (!tokenUserId || tokenUserId !== userId) {
       return {
         statusCode: 401,
         headers: HEADERS,

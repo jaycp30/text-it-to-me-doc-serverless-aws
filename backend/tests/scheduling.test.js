@@ -400,6 +400,44 @@ describe("validateKeyOwnership — the caller must own the keys they submit", ()
     expect(validateKeyOwnership([`../${UID}/prescriptions/up1/page-1.jpg`], UID).error?.statusCode).toBe(403);
   });
 
+  it("rejects dot segments that walk out of the caller's own prefix", () => {
+    // startsWith accepted this. S3 treats keys as opaque so it would not have
+    // reached the victim's object, but cross-tenant health-data access should
+    // not depend on that staying true of whichever SDK signs the request.
+    const key = `${UID}/prescriptions/../../u-victim-0000/prescriptions/page-1.jpg`;
+    expect(validateKeyOwnership([key], UID).error?.statusCode).toBe(403);
+  });
+
+  it("rejects a key that is not the shape getUploadUrl writes", () => {
+    for (const bad of [
+      `${UID}/prescriptions/up1/page-9.jpg`,      // page out of range
+      `${UID}/prescriptions/up1/page-1.gif`,      // extension not allowed
+      `${UID}/prescriptions/up1/../page-1.jpg`,   // dot segment
+      `${UID}/prescriptions/page-1.jpg`,          // missing uploadId segment
+      `${UID}/prescriptions/up1/sub/page-1.jpg`,  // extra segment
+      `${UID}/PRESCRIPTIONS/up1/page-1.jpg`,      // wrong case
+    ]) {
+      expect(validateKeyOwnership([bad], UID).error?.statusCode).toBe(403);
+    }
+  });
+
+  it("rejects everything when the caller's own id is malformed", () => {
+    // Defensive: userId is interpolated into a regex, so a pure module must not
+    // rely on the handler having verified its shape.
+    expect(validateKeyOwnership([`x/prescriptions/up1/page-1.jpg`], "a.b").error?.statusCode).toBe(403);
+    expect(validateKeyOwnership([`x/prescriptions/up1/page-1.jpg`], "").error?.statusCode).toBe(403);
+  });
+
+  it("accepts every allowed page number and extension", () => {
+    for (const ok of [
+      `${UID}/prescriptions/up1/page-1.jpg`,
+      `${UID}/prescriptions/up1/page-5.png`,
+      `${UID}/prescriptions/rx-upload-abc_123/page-3.webp`,
+    ]) {
+      expect(validateKeyOwnership([ok], UID).error).toBeNull();
+    }
+  });
+
   it("accepts an empty key list (validateImageKeys already rejected it)", () => {
     expect(validateKeyOwnership([], UID).error).toBeNull();
     expect(validateKeyOwnership(undefined, UID).error).toBeNull();

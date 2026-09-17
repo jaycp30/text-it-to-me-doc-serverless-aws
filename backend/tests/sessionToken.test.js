@@ -82,6 +82,21 @@ describe("signSessionToken / verifySessionToken round trip", () => {
     expect(signSessionToken("", SECRET)).toBeNull();
   });
 
+  it("refuses to sign an id it would later refuse to verify", () => {
+    // Asymmetry here is a silent failure loop: notifyUser signs a link for a
+    // legacy uid, SES delivers it, and every click 401s with nothing logged.
+    // Returning null makes the URL builders degrade to the bare app URL, and
+    // the console.error is the CloudWatch signal that it happened.
+    for (const bad of ["a.b", "a/b", "has space", "x".repeat(121), "../etc"]) {
+      expect(signSessionToken(bad, SECRET, NOW)).toBeNull();
+    }
+  });
+
+  it("still signs legacy ids that predate the pattern but satisfy it", () => {
+    expect(signSessionToken("local-400dbaf6-f12d-4e1a-a8e5-6ec1624e45ea", SECRET, NOW)).toBeTruthy();
+    expect(signSessionToken("codex-qa-20260531-0543", SECRET, NOW)).toBeTruthy();
+  });
+
   it("rejects a token signed with a different secret", () => {
     const token = signSessionToken("u-abc", "other-secret", NOW);
     expect(verifySessionToken(token, SECRET, NOW)).toBeNull();

@@ -79,8 +79,29 @@ function validateImageKeys({ imageKey, imageKeys } = {}) {
  * @returns {{ error: { statusCode: number, code: string, message: string } | null }}
  */
 function validateKeyOwnership(keys, userId) {
-  const prefix = `${userId}/prescriptions/`;
-  const foreign = (keys || []).filter((key) => !String(key).startsWith(prefix));
+  // userId is interpolated into a regex below, so its shape is asserted first.
+  // verifySessionToken already guarantees it, but a pure module should not
+  // depend on a caller's guarantee to stay injection-free.
+  if (!/^[A-Za-z0-9_-]{1,120}$/.test(String(userId || ""))) {
+    return {
+      error: {
+        statusCode: 403,
+        code: "FOREIGN_IMAGE_KEYS",
+        message: "Those uploads do not belong to this session.",
+      },
+    };
+  }
+
+  // Matched exactly, not by prefix. A startsWith check accepts
+  // `<uid>/prescriptions/../../<victim>/prescriptions/page-1.jpg`, which is
+  // only harmless because S3 treats keys as opaque strings and does not
+  // normalise dot segments. Cross-tenant access to health data should not rest
+  // on that being true of whichever SDK signs the request next year. We control
+  // the entire key shape, so we can simply require it.
+  const shape = new RegExp(
+    `^${userId}/prescriptions/[A-Za-z0-9_-]{1,120}/page-[1-5]\\.(jpg|png|webp)$`,
+  );
+  const foreign = (keys || []).filter((key) => !shape.test(String(key)));
 
   if (foreign.length > 0) {
     return {

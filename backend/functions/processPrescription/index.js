@@ -78,9 +78,6 @@ module.exports.handler = async (event, context) => {
     } = body;
 
     // ── Validation ────────────────────────────────────────────────────────
-    const { keys, error: imageKeysError } = validateImageKeys({ imageKey, imageKeys });
-    if (imageKeysError) return errorResponse({ headers, requestId, ...imageKeysError });
-
     // Identity comes from the signed token and nowhere else. This endpoint used
     // to take a userId from the body and then SIGN A TOKEN FOR IT, which let
     // anyone who knew another user's id impersonate them outright.
@@ -92,11 +89,13 @@ module.exports.handler = async (event, context) => {
       });
     }
 
-    // The keys must live under the caller's own prefix. Without this, a user
-    // with a perfectly valid identity of their own could pass someone else's
-    // key and have the worker read, OCR and store that prescription into their
-    // partition. The prefix is byte-identical to the one getUploadUrl writes:
-    // every accepted uid matches USER_ID_PATTERN, so safeSegment is a no-op.
+    const { keys, error: imageKeysError } = validateImageKeys({ imageKey, imageKeys });
+    if (imageKeysError) return errorResponse({ headers, requestId, ...imageKeysError });
+
+    // The keys must be the caller's own. Without this, a user with a perfectly
+    // valid identity of their own could pass someone else's key and have the
+    // worker read, OCR and store that prescription into their partition.
+    // Matched against the exact key shape getUploadUrl writes, not by prefix.
     const { error: ownershipError } = validateKeyOwnership(keys, userId);
     if (ownershipError) return errorResponse({ headers, requestId, ...ownershipError });
 
@@ -165,7 +164,7 @@ module.exports.handler = async (event, context) => {
 
       // Still processing — hand the client the same job to poll rather than
       // starting a second one.
-      return accepted({ headers, userId, scheduleId, prescriptionId, duplicate: true });
+      return accepted({ headers, scheduleId, prescriptionId, duplicate: true });
     }
 
     // ── Hand off to the worker ────────────────────────────────────────────
@@ -179,7 +178,7 @@ module.exports.handler = async (event, context) => {
     }));
     console.log(`[${userId}] Queued worker for ${scheduleId}`);
 
-    return accepted({ headers, userId, scheduleId, prescriptionId });
+    return accepted({ headers, scheduleId, prescriptionId });
 
   } catch (error) {
     console.error("Unhandled error:", error);
@@ -211,7 +210,7 @@ module.exports.handler = async (event, context) => {
  * No session token is returned. The client already holds one from
  * POST /upload-url, which is now the only place an identity is minted.
  */
-function accepted({ headers, userId, scheduleId, prescriptionId, duplicate = false }) {
+function accepted({ headers, scheduleId, prescriptionId, duplicate = false }) {
   return {
     statusCode: 202,
     headers,

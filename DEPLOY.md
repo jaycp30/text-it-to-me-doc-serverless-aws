@@ -665,8 +665,55 @@ no ordering that avoids a window where uploads fail:
 | Frontend first | New frontend gets `400 MISSING_USER` from the old backend for the same window |
 
 Deploy the backend first — it is the fast half, and it fails closed rather than
-minting a stray identity per upload. Existing sessions end either way, because
-the rotation invalidates their tokens; anyone affected simply uploads again.
+minting a stray identity per upload.
+
+### What rotation actually costs an existing user
+
+**"Just upload again" does not recover anything, and it is important to be clear
+about that.** A new upload mints a *new* `u-<uuid>`. Nothing in the system can
+ever mint a token for an *existing* id again — `getUploadUrl` only signs for
+`newUserId()`. So once the secret rotates, records under an old id are
+unreachable by that user: they cannot cancel their reminders, and they cannot
+exercise erasure on Art. 9 data they can no longer authenticate to.
+
+How each channel fares:
+
+| Channel | Recovery |
+|---|---|
+| **Email** | Self-heals within 24h. `notifyUser` signs with the *current* secret at send time, so the next dose reminder or daily summary carries a working link for the legacy id. |
+| **SMS** | **Never.** SMS carries no links, so there is no path back in. |
+
+Before rotating, measure the blast radius rather than assuming it:
+
+```bash
+aws dynamodb scan --table-name rx-schedules --region ap-northeast-1 \
+  --filter-expression "#a = :t" \
+  --expression-attribute-names '{"#a":"active"}' \
+  --expression-attribute-values '{":t":{"BOOL":true}}' \
+  --projection-expression "userId,notificationMethod" \
+  --query 'Items[].[userId.S,notificationMethod.S]' --output text
+aws scheduler list-schedules --group-name rx-medication-reminders \
+  --region ap-northeast-1 --query 'length(Schedules)' --output text
+```
+
+Measured on 2026-09-17 before this deploy: 6 active schedules (5 SMS, 1 email)
+across test identities created 30–31 May, and **0 pending Scheduler rules** —
+every rule had already fired and auto-deleted. Nothing was going to keep firing,
+so nobody could be stranded with uncancellable reminders, and rotating hard was
+free. **Re-run both commands before rotating again**; if either returns real
+users with pending rules, the honest options are to accept that SMS users are
+stranded, or to run a dual-secret grace period (verify against both old and new
+for 24–48h, sign with the new) — which keeps any fraudulently minted token alive
+for that same window.
+
+### Session lifetime after this change
+
+Nothing re-issues a session token: `getUploadUrl` signs only when it mints a new
+identity, and `/process` never signs. A session therefore hard-expires **90 days**
+after the first upload, while the records behind it live a year (`ttlOneYear`).
+Email users get a fresh link with every reminder, so this bites only an email
+user with no active reminders, or an SMS user. That is deliberate — re-issuing on
+presentation of a valid token would let a stolen token be renewed indefinitely.
 
 ### Sequence
 
@@ -678,6 +725,17 @@ the rotation invalidates their tokens; anyone affected simply uploads again.
 ```bash
 sam build
 sam package --resolve-s3 --output-template-file /tmp/packaged.yaml --region ap-northeast-1
+```
+
+Before deploying, confirm the layer will actually package. `sam build` does not
+build a `LayerVersion` that declares no `BuildMethod` — it rewrites `ContentUri`
+to point back at the source tree, which is fine, but an empty or wrong path
+deploys green and then throws `Cannot find module 'rx-session-token'` on every
+cold start. Check that the packaged template references a real directory:
+
+```bash
+grep -A2 "AuthLayer:" .aws-sam/build/template.yaml
+ls backend/layers/auth/nodejs/node_modules/rx-session-token/index.js
 ```
 
 Then, substituting the value you generated above for `<new-secret>`:

@@ -195,6 +195,9 @@ Resources:
         "POST /notify-test":  # SES email — reputation risk
           ThrottlingBurstLimit: 2
           ThrottlingRateLimit: 1
+        "POST /upload-url":   # mints an identity + a presigned PUT, unauthenticated
+          ThrottlingBurstLimit: 5
+          ThrottlingRateLimit: 2
       CorsConfiguration:
         AllowOrigins:
           - !Ref AppUrl
@@ -221,9 +224,12 @@ Resources:
   # exercise the module that actually runs.
   #
   # Attach this to any function whose code — or any module it loads — requires
-  # rx-session-token, even one that never signs or verifies. The worker below is
-  # exactly that case: it holds no secret, but loads shared.js, which imports the
-  # layer at module scope and would fail on cold start without it.
+  # rx-session-token, even one that never signs or verifies itself: the require
+  # runs at module scope, so a missing layer throws on cold start rather than at
+  # deploy time. ProcessPrescriptionWorkerFunction does not currently need it
+  # (shared.js stopped signing when identity moved to getUploadUrl) and keeps it
+  # anyway, because it shares a CodeUri with the handler that does and the cost
+  # of a layer nothing imports is zero.
   AuthLayer:
     Type: AWS::Serverless::LayerVersion
     Properties:

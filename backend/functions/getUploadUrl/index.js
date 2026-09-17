@@ -110,14 +110,20 @@ module.exports.handler = async (event, context) => {
     // S3 "folders" are prefixes; grouping pages under uploadId keeps one
     // prescription's screenshots together for traceability.
     const ext = fileType.split("/")[1].replace("jpeg", "jpg");
-    // safeSegment is a no-op on userId now: it is either newly minted by
+    // userId goes in RAW, deliberately. It is either freshly minted by
     // newUserId() or came from a verified token, and verifySessionToken rejects
-    // any uid outside USER_ID_PATTERN. Kept so the invariant is belt-and-braces
-    // rather than assumed — and, critically, so this prefix stays byte-identical
-    // to the one /process validates against and erasure later enumerates.
-    const safeUserId = safeSegment(userId);
+    // any uid outside USER_ID_PATTERN — so it is already safe as a key segment.
+    //
+    // Running it through safeSegment would be actively harmful: the two
+    // disagree. safeSegment collapses repeated dashes and strips leading and
+    // trailing ones, which the pattern allows, so `u--abc` would be WRITTEN
+    // under `u-abc/` while /process and erasure look under `u--abc/` — and
+    // `---` would collapse to an empty prefix entirely. That is exactly the
+    // write-vs-search drift this endpoint has to avoid.
+    //
+    // uploadId keeps safeSegment: it is still client-supplied and unvalidated.
     const safeUploadId = safeSegment(uploadId) || `rx-upload-${randomUUID()}`;
-    const imageKey = `${safeUserId}/prescriptions/${safeUploadId}/page-${page}.${ext}`;
+    const imageKey = `${userId}/prescriptions/${safeUploadId}/page-${page}.${ext}`;
 
     const command = new PutObjectCommand({
       Bucket: IMAGES_BUCKET,
