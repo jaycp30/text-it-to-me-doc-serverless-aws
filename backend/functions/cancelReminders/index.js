@@ -13,9 +13,12 @@ const { DynamoDBClient } = require("@aws-sdk/client-dynamodb");
 const { DynamoDBDocumentClient, QueryCommand, UpdateCommand } = require("@aws-sdk/lib-dynamodb");
 const { SchedulerClient, DeleteScheduleCommand } = require("@aws-sdk/client-scheduler");
 
-// Pure helpers (token verification, idempotent cancel counting) live in lib.js
-// so they can be unit-tested without AWS. See backend/tests/cancelReminders.test.js.
-const { verifySessionToken, collectRuleNames, countCancelled } = require("./lib");
+// Pure helpers (idempotent cancel counting) live in lib.js so they can be
+// unit-tested without AWS. See backend/tests/cancelReminders.test.js.
+const { collectRuleNames, countCancelled } = require("./lib");
+// One implementation of the auth primitive, shipped as a layer. See
+// backend/layers/auth/nodejs/node_modules/rx-session-token/.
+const { verifySessionToken } = require("rx-session-token");
 
 const dynamo    = DynamoDBDocumentClient.from(new DynamoDBClient({}));
 const scheduler = new SchedulerClient({});

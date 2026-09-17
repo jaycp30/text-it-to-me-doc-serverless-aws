@@ -163,6 +163,34 @@ Now create a `package.json` in **each** folder. The `nodejs20.x` runtime ships t
 }
 ```
 
+### The auth layer (`rx-session-token`)
+
+Session-token signing and verification live in **one** place,
+`backend/layers/auth/nodejs/node_modules/rx-session-token/`, shipped as the
+`AuthLayer` LayerVersion and required by handlers as the bare specifier
+`rx-session-token`.
+
+Three things about it are easy to get wrong:
+
+1. **The `nodejs/node_modules/<name>` path is required, not stylistic.** Lambda
+   puts `/opt/nodejs/node_modules` on `NODE_PATH`, which is what makes the bare
+   require resolve at runtime. The repo resolves the same specifier through the
+   `file:` devDependency in the root `package.json`, so tests exercise the module
+   that actually runs. Run `npm install` at the repo root after cloning.
+2. **`.gitignore` needs its negations.** The layer lives under a `node_modules/`
+   path, so the blanket `node_modules/` rule would exclude it from the repo and
+   every function requiring it would fail on cold start after a fresh clone. The
+   `!backend/layers/**/node_modules/**` lines exist for exactly this.
+3. **Attach the layer to any function that loads it, even one that never uses
+   it.** `ProcessPrescriptionWorkerFunction` holds no `MAGIC_LINK_SECRET` and
+   never signs anything, but it loads `shared.js`, which imports the layer at
+   module scope — without `Layers: [!Ref AuthLayer]` it throws on cold start.
+
+`sam build` does not copy a layer that declares no `BuildMethod`; it rewrites
+`ContentUri` to point back at the source directory, and `sam package` zips it
+from there. That is expected — an empty `.aws-sam/build/AuthLayer/` is not a
+failure.
+
 ---
 
 ## Step 2 — Create the chat Lambda

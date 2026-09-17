@@ -2,30 +2,13 @@
 
 const { DynamoDBClient } = require("@aws-sdk/client-dynamodb");
 const { DynamoDBDocumentClient, QueryCommand } = require("@aws-sdk/lib-dynamodb");
-const { createHmac } = require("crypto");
+// One implementation of the auth primitive, shipped as a layer. See
+// backend/layers/auth/nodejs/node_modules/rx-session-token/.
+const { verifySessionToken } = require("rx-session-token");
 
 const dynamo = DynamoDBDocumentClient.from(new DynamoDBClient({}));
 const SCHEDULES_TABLE = process.env.SCHEDULES_TABLE;
 const MAGIC_LINK_SECRET = process.env.MAGIC_LINK_SECRET || "";
-
-// ─── Session token verification ───────────────────────────────────────────────
-
-function verifySessionToken(token) {
-  if (!MAGIC_LINK_SECRET || !token) return null;
-  const parts = String(token).split(".");
-  if (parts.length !== 2) return null;
-  const [payload, sig] = parts;
-  const expected = createHmac("sha256", MAGIC_LINK_SECRET).update(payload).digest("base64url");
-  if (sig !== expected) return null;
-  try {
-    const data = JSON.parse(Buffer.from(payload, "base64url").toString());
-    if (!data.uid || !data.exp) return null;
-    if (Math.floor(Date.now() / 1000) > data.exp) return null;
-    return data.uid;
-  } catch {
-    return null;
-  }
-}
 
 // ─── Handler ──────────────────────────────────────────────────────────────────
 
@@ -40,7 +23,7 @@ module.exports.handler = async (event) => {
     const token = params.token;
     const includeInactive = params.includeInactive === "true";
 
-    const userId = verifySessionToken(token);
+    const userId = verifySessionToken(token, MAGIC_LINK_SECRET);
 
     if (!userId) {
       return {

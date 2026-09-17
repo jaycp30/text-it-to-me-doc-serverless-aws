@@ -4,40 +4,13 @@
  * lib.js
  *
  * Pure helpers extracted from cancelReminders/index.js for unit testing without
- * AWS. Covers session-token verification and the idempotent "count what was
- * cancelled" logic that makes a repeated unsubscribe safe.
- */
-
-const { createHmac } = require("crypto");
-
-/**
- * Verify an HMAC-signed session token of the form
- *   base64url(payload).base64url(HMAC-SHA256(secret, payload))
- * where payload is JSON `{ uid, exp }` (exp is a Unix timestamp in seconds).
+ * AWS. Covers the idempotent "count what was cancelled" logic that makes a
+ * repeated unsubscribe safe.
  *
- * @param {string} token
- * @param {string} secret        the MagicLink signing secret
- * @param {number} [nowSeconds]  current time in Unix seconds (injectable for tests)
- * @returns {string|null}        the user id if valid and unexpired, else null
+ * Session-token verification used to live here too. It now lives in the auth
+ * layer (backend/layers/auth/nodejs/node_modules/rx-session-token/) so there is one
+ * copy of it across all the functions that need it.
  */
-function verifySessionToken(token, secret, nowSeconds = Math.floor(Date.now() / 1000)) {
-  if (!secret || !token) return null;
-  const parts = String(token).split(".");
-  if (parts.length !== 2) return null;
-
-  const [payload, sig] = parts;
-  const expected = createHmac("sha256", secret).update(payload).digest("base64url");
-  if (sig !== expected) return null;
-
-  try {
-    const data = JSON.parse(Buffer.from(payload, "base64url").toString());
-    if (!data.uid || !data.exp) return null;
-    if (nowSeconds > data.exp) return null;
-    return data.uid;
-  } catch {
-    return null;
-  }
-}
 
 /**
  * Collect every EventBridge Scheduler rule name across a user's schedule
@@ -79,7 +52,6 @@ function countCancelled(results) {
 }
 
 module.exports = {
-  verifySessionToken,
   collectRuleNames,
   isCancelHandled,
   countCancelled,

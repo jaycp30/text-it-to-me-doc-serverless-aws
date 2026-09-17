@@ -208,6 +208,34 @@ Resources:
           - Content-Type
         MaxAge: 600
 
+  # ── Lambda layer: the session-token auth primitive ───────────────────────
+  # One implementation of HMAC signing and verification, shared by every
+  # function that needs it. It used to be copy-pasted into four functions,
+  # which meant a fix applied to one left the other three wrong.
+  #
+  # A layer rather than a shared file because SAM packages each function's
+  # CodeUri on its own, so a require across function folders throws at runtime.
+  # The nodejs/node_modules/<name> layout puts it on Lambda's NODE_PATH, so
+  # handlers require the bare specifier "rx-session-token" — the same specifier
+  # the repo resolves via the file: dependency in package.json, so tests
+  # exercise the module that actually runs.
+  #
+  # Attach this to any function whose code — or any module it loads — requires
+  # rx-session-token, even one that never signs or verifies. The worker below is
+  # exactly that case: it holds no secret, but loads shared.js, which imports the
+  # layer at module scope and would fail on cold start without it.
+  AuthLayer:
+    Type: AWS::Serverless::LayerVersion
+    Properties:
+      LayerName: rx-session-token
+      Description: HMAC session-token signing and verification
+      ContentUri: backend/layers/auth/
+      CompatibleRuntimes:
+        - nodejs24.x
+      CompatibleArchitectures:
+        - arm64
+      RetentionPolicy: Delete
+
   # ── Lambda: get presigned S3 upload URL ──────────────────────────────────
   # Frontend calls this first, uploads image directly to S3 (no Lambda proxy)
   GetUploadUrlFunction:
@@ -237,6 +265,8 @@ Resources:
     Properties:
       FunctionName: rx-process-prescription
       Handler: index.handler
+      Layers:
+        - !Ref AuthLayer
       CodeUri: backend/functions/processPrescription/
       # One DynamoDB write plus an async invoke. API Gateway gives up at 30s
       # anyway, so a larger value here would only ever be dead configuration.
@@ -269,6 +299,8 @@ Resources:
     Properties:
       FunctionName: rx-process-prescription-worker
       Handler: worker.handler
+      Layers:
+        - !Ref AuthLayer
       CodeUri: backend/functions/processPrescription/
       # Bedrock needs 30-60s on a busy prescription; 300s leaves generous room
       # while staying far inside Lambda's 15-minute asynchronous limit. No
@@ -324,6 +356,8 @@ Resources:
     Properties:
       FunctionName: rx-notify-user
       Handler: index.handler
+      Layers:
+        - !Ref AuthLayer
       CodeUri: backend/functions/notifyUser/
       Policies:
         - DynamoDBReadPolicy:
@@ -396,6 +430,8 @@ Resources:
     Properties:
       FunctionName: rx-cancel-reminders
       Handler: index.handler
+      Layers:
+        - !Ref AuthLayer
       CodeUri: backend/functions/cancelReminders/
       Environment:
         Variables:
@@ -425,6 +461,8 @@ Resources:
     Properties:
       FunctionName: rx-get-schedules
       Handler: index.handler
+      Layers:
+        - !Ref AuthLayer
       CodeUri: backend/functions/getSchedules/
       Environment:
         Variables:

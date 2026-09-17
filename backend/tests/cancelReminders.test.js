@@ -2,11 +2,16 @@ import { describe, it, expect } from "vitest";
 import { createHmac } from "crypto";
 
 import {
-  verifySessionToken,
   collectRuleNames,
   isCancelHandled,
   countCancelled,
 } from "../functions/cancelReminders/lib.js";
+
+// Verification now lives in the auth layer rather than in each function. Lambda
+// resolves this bare specifier from /opt/nodejs/node_modules; the repo resolves
+// it through the file: dependency in the root package.json. Same module both
+// ways, so what is tested here is what actually runs.
+import { verifySessionToken } from "rx-session-token";
 
 const SECRET = "test-magic-link-secret";
 

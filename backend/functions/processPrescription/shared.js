@@ -18,7 +18,10 @@
 
 const { DynamoDBClient } = require("@aws-sdk/client-dynamodb");
 const { DynamoDBDocumentClient, GetCommand, UpdateCommand } = require("@aws-sdk/lib-dynamodb");
-const { createHash, createHmac } = require("crypto");
+const { createHash } = require("crypto");
+// One implementation of the auth primitive, shipped as a layer. See
+// backend/layers/auth/nodejs/node_modules/rx-session-token/.
+const { signSessionToken: signToken } = require("rx-session-token");
 
 const dynamo = DynamoDBDocumentClient.from(new DynamoDBClient({}));
 
@@ -35,14 +38,10 @@ const STAGES = Object.freeze({
 
 // ─── Session token signing ────────────────────────────────────────────────────
 
-const TOKEN_TTL_SECONDS = 90 * 24 * 60 * 60; // 90 days
-
+// Thin wrapper keeping this module's existing one-argument call sites working;
+// the secret comes from the environment here rather than from the caller.
 function signSessionToken(userId) {
-  if (!MAGIC_LINK_SECRET) return null;
-  const exp = Math.floor(Date.now() / 1000) + TOKEN_TTL_SECONDS;
-  const payload = Buffer.from(JSON.stringify({ uid: userId, exp })).toString("base64url");
-  const sig = createHmac("sha256", MAGIC_LINK_SECRET).update(payload).digest("base64url");
-  return `${payload}.${sig}`;
+  return signToken(userId, MAGIC_LINK_SECRET);
 }
 
 // ─── TTL helper ───────────────────────────────────────────────────────────────

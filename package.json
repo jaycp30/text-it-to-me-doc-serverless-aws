@@ -11,6 +11,7 @@
   },
   "devDependencies": {
     "luxon": "^3.5.0",
-    "vitest": "^2.1.8"
+    "vitest": "^2.1.8",
+    "rx-session-token": "file:backend/layers/auth/nodejs/node_modules/rx-session-token"
   }
 }

@@ -12,24 +12,10 @@
  * from module-scope env, so tests can sign and assert links deterministically.
  */
 
-const { createHmac } = require("crypto");
-
-const TOKEN_TTL_SECONDS = 90 * 24 * 60 * 60; // 90 days
-
-/**
- * Sign an HMAC session token: base64url(payload).base64url(HMAC-SHA256).
- * @param {string} userId
- * @param {string} secret
- * @param {number} [nowSeconds] injectable clock for tests
- * @returns {string|null}
- */
-function signSessionToken(userId, secret, nowSeconds = Math.floor(Date.now() / 1000)) {
-  if (!secret || !userId) return null;
-  const exp = nowSeconds + TOKEN_TTL_SECONDS;
-  const payload = Buffer.from(JSON.stringify({ uid: userId, exp })).toString("base64url");
-  const sig = createHmac("sha256", secret).update(payload).digest("base64url");
-  return `${payload}.${sig}`;
-}
+// One implementation of the auth primitive, shipped as a layer. See
+// backend/layers/auth/nodejs/node_modules/rx-session-token/. Re-exported below so this
+// module's own public surface (and its tests) are unchanged.
+const { TOKEN_TTL_SECONDS, signSessionToken } = require("rx-session-token");
 
 /**
  * Deep-link back into the app with a signed session token so the user can reopen

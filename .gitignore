@@ -1,6 +1,14 @@
 # Dependencies
 node_modules/
 
+# ...except the Lambda layers, which are first-party source that HAS to live
+# under a node_modules/ path — that is what puts them on Lambda's NODE_PATH and
+# lets handlers require them as a bare specifier. Without these negations the
+# auth layer is silently excluded from the repo and every function that requires
+# it fails on cold start after a fresh clone.
+!backend/layers/**/node_modules/
+!backend/layers/**/node_modules/**
+
 # Build output
 dist/
 build/
