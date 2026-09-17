@@ -163,6 +163,30 @@ Now create a `package.json` in **each** folder. The `nodejs20.x` runtime ships t
 }
 ```
 
+**`backend/functions/deleteUserData/package.json`**
+```json
+{
+  "name": "rx-delete-user-data",
+  "version": "1.0.0",
+  "main": "index.js",
+  "dependencies": {
+    "@aws-sdk/client-dynamodb": "^3.700.0",
+    "@aws-sdk/client-s3": "^3.700.0",
+    "@aws-sdk/client-scheduler": "^3.700.0",
+    "@aws-sdk/lib-dynamodb": "^3.700.0"
+  }
+}
+```
+
+This is the only function that carries `s3:DeleteObject`. It backs
+`DELETE /data/{userId}` (right to erasure) and is kept separate from
+`rx-cancel-reminders` on purpose — cancelling reminders is reachable one click
+from every email, and must not be able to delete prescription images.
+
+Its log group is declared in `template.yaml` like the others, but needs **no**
+one-time migration: the function has never run, so Lambda has not auto-created
+the group and there is nothing for CloudFormation to collide with.
+
 ### The auth layer (`rx-session-token`)
 
 Session-token signing and verification live in **one** place,

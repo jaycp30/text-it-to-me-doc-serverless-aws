@@ -42,6 +42,25 @@ function buildUnsubscribeUrl(userId, { appUrl, secret } = {}) {
     : `${appUrl}/?unsubscribe=${encodeURIComponent(userId)}`;
 }
 
+/**
+ * Erasure link (GDPR Art. 17) carrying the user id and a signed session token.
+ *
+ * Unlike the unsubscribe link, this one does NOT act when opened — the app
+ * parses it and shows a confirmation dialog. That difference is deliberate:
+ * mail clients and security appliances routinely prefetch links in email, and a
+ * one-click irreversible delete would let a prefetch destroy someone's data.
+ *
+ * @param {string} userId
+ * @param {{ appUrl: string, secret?: string }} config
+ */
+function buildDeleteDataUrl(userId, { appUrl, secret } = {}) {
+  if (!userId) return null;
+  const token = signSessionToken(userId, secret);
+  return token
+    ? `${appUrl}/?delete=${encodeURIComponent(userId)}&token=${encodeURIComponent(token)}`
+    : `${appUrl}/?delete=${encodeURIComponent(userId)}`;
+}
+
 // ─── Message formatters (plain text — used for SMS and email fallback) ────────
 
 function formatDoseMessage(dose) {
@@ -107,6 +126,7 @@ function buildHtmlEmail({ type, bodyText, dose, doses, medications, dosesSchedul
 
   const sessionUrl     = buildSessionUrl(userId, config);
   const unsubscribeUrl = buildUnsubscribeUrl(userId, config);
+  const deleteDataUrl  = buildDeleteDataUrl(userId, config);
 
   let bodyContent;
 
@@ -252,6 +272,8 @@ function buildHtmlEmail({ type, bodyText, dose, doses, medications, dosesSchedul
               ${unsubscribeUrl ? `<p style="margin:0;font-size:12px;line-height:1.6;">
                 <a href="${unsubscribeUrl}" style="color:#2d6a4f;text-decoration:underline;">Unsubscribe</a>
                 <span style="color:#ccc;"> &middot; </span>
+                <a href="${deleteDataUrl}" style="color:#2d6a4f;text-decoration:underline;">Delete my data</a>
+                <span style="color:#ccc;"> &middot; </span>
                 <a href="${sessionUrl}" style="color:#aaa;text-decoration:none;">Open my schedule</a>
               </p>` : ""}
             </td>
@@ -269,6 +291,7 @@ module.exports = {
   TOKEN_TTL_SECONDS,
   signSessionToken,
   buildSessionUrl,
+  buildDeleteDataUrl,
   buildUnsubscribeUrl,
   formatDoseMessage,
   formatDailySummaryMessage,

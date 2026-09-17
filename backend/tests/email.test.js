@@ -4,6 +4,7 @@ import {
   signSessionToken,
   buildSessionUrl,
   buildUnsubscribeUrl,
+  buildDeleteDataUrl,
   buildHtmlEmail,
   formatDoseMessage,
   formatDailySummaryMessage,
@@ -47,6 +48,29 @@ describe("session-token signing & links", () => {
   it("returns no unsubscribe URL without a user id", () => {
     expect(buildUnsubscribeUrl("", CONFIG)).toBeNull();
   });
+
+  it("builds a delete-data URL carrying the user id and token", () => {
+    const url = buildDeleteDataUrl(USER_ID, CONFIG);
+    expect(url).toContain(`delete=${USER_ID}`);
+    expect(url).toContain("&token=");
+  });
+
+  it("keeps the delete link on its own parameter, distinct from unsubscribe", () => {
+    // The app routes on these two parameters and treats them very differently:
+    // ?unsubscribe= acts on load, ?delete= only opens a confirmation. If they
+    // ever collided, a prefetched link could destroy data irreversibly.
+    const deleteUrl = buildDeleteDataUrl(USER_ID, CONFIG);
+    expect(deleteUrl).not.toContain("unsubscribe=");
+    expect(buildUnsubscribeUrl(USER_ID, CONFIG)).not.toContain("delete=");
+  });
+
+  it("returns no delete URL without a user id", () => {
+    expect(buildDeleteDataUrl("", CONFIG)).toBeNull();
+  });
+
+  it("falls back to an unsigned delete link when no secret is configured", () => {
+    expect(buildDeleteDataUrl(USER_ID, { appUrl: APP_URL })).toBe(`${APP_URL}/?delete=${USER_ID}`);
+  });
 });
 
 describe("buildHtmlEmail — session & unsubscribe links in the template", () => {
@@ -62,6 +86,17 @@ describe("buildHtmlEmail — session & unsubscribe links in the template", () =>
     expect(html).toContain(`href="${sessionUrl}"`);
     expect(html).toContain(`href="${unsubscribeUrl}"`);
     expect(html).toContain("Unsubscribe");
+  });
+
+  it("offers erasure alongside unsubscribe in the footer", () => {
+    // Art. 17 has to be as reachable as opting out, not buried in the policy.
+    const deleteDataUrl = buildDeleteDataUrl(USER_ID, CONFIG);
+    const html = buildHtmlEmail(
+      { type: "subscribed", userId: USER_ID, medications: [{ name: "metformin", dose_mg: 500 }], dosesScheduled: 3 },
+      CONFIG,
+    );
+    expect(html).toContain(`href="${deleteDataUrl}"`);
+    expect(html).toContain("Delete my data");
   });
 
   it("renders the unsubscribe footer for a dose reminder when a user id is present", () => {
