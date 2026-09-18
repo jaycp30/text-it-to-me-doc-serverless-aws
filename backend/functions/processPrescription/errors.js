@@ -14,6 +14,7 @@
 // Frozen so a typo like CODES.TOO_MANY_IMAGE throws instead of silently
 // producing an undefined code that the frontend can't map.
 const CODES = Object.freeze({
+  MALFORMED_JSON:        "MALFORMED_JSON",        // request body is not valid JSON
   MISSING_IMAGES:        "MISSING_IMAGES",        // no imageKey/imageKeys supplied
   TOO_MANY_IMAGES:       "TOO_MANY_IMAGES",       // more than MAX_IMAGES
   MISSING_USER:          "MISSING_USER",          // no userId

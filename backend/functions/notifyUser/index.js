@@ -28,14 +28,24 @@ const sns = new SNSClient({});
 const ses = new SESClient({});
 
 const SES_FROM_EMAIL       = process.env.SES_FROM_EMAIL       || "noreply@rxreader.app";
+// NOTE: this fallback is a stale Amplify default, not the live custom domain.
+// It only bites if APP_URL is ever unset (it is set for every function via the
+// template Globals), but if that happened every email link would point at the
+// wrong host. Left alone here as out of scope — see the note in issue #39.
 const APP_URL              = process.env.APP_URL              || "https://main.d3bj6u7583ielg.amplifyapp.com";
+
+// Deliberately NOT APP_URL: that constant carries the stale fallback above, and
+// advertising a stale origin as trusted is exactly the kind of drift issue #39
+// is about. A strict read means an unset APP_URL omits the header entirely,
+// which fails closed.
+const CORS_ORIGIN          = process.env.APP_URL || "";
 const TURNSTILE_SECRET_KEY = process.env.TURNSTILE_SECRET_KEY || "";
 const MAGIC_LINK_SECRET    = process.env.MAGIC_LINK_SECRET    || "";
 const TURNSTILE_VERIFY_URL = "https://challenges.cloudflare.com/turnstile/v0/siteverify";
 
 const RESPONSE_HEADERS = {
   "Content-Type": "application/json",
-  "Access-Control-Allow-Origin": "*",
+  ...(CORS_ORIGIN ? { "Access-Control-Allow-Origin": CORS_ORIGIN } : {}),
 };
 
 // SECURITY-CRITICAL. Two protections below key off this: Turnstile only runs
@@ -57,6 +67,8 @@ function response(statusCode, payload, http = true) {
   };
 }
 
+// Only an HTTP invocation carries a body to parse; Scheduler, worker and
+// dailySummary invocations hand over an object directly and cannot throw here.
 function getPayload(event) {
   if (!isHttpEvent(event)) return event;
   return JSON.parse(event.body || "{}");
@@ -168,8 +180,16 @@ module.exports.handler = async (event) => {
   // the deliberate masking in sendSms/sendEmail below. Log the shape only.
   console.log(`NotifyUser invoked via ${http ? "http" : "scheduler"}`);
 
+  // Parsed before the main try: inside it a malformed body would hit the
+  // catch-all and return 500, blaming the server for the caller's bad request.
+  let payload;
   try {
-    const payload = getPayload(event);
+    payload = getPayload(event);
+  } catch {
+    return response(400, { error: "Request body is not valid JSON.", code: "MALFORMED_JSON" }, http);
+  }
+
+  try {
     const {
       userId,
       notificationMethod, // "sms" | "email"

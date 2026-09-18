@@ -49,11 +49,20 @@ const lambda = new LambdaClient({});
 const { SCHEDULES_TABLE, WORKER_FUNCTION_ARN } = process.env;
 const MAGIC_LINK_SECRET = process.env.MAGIC_LINK_SECRET || "";
 
+// Scoped to the app origin rather than "*". The HttpApi's own CorsConfiguration
+// is already locked to AppUrl, but these per-response headers are what a browser
+// actually reads, so a wildcard here quietly widens what the template claims.
+//
+// Omitted entirely when APP_URL is unset rather than sent as "null": "null" is a
+// real origin a browser will match (sandboxed iframes, some redirect and data:
+// contexts), so it fails open where omitting fails closed.
+const APP_URL = process.env.APP_URL || "";
+
 // ─── Handler ──────────────────────────────────────────────────────────────────
 module.exports.handler = async (event, context) => {
   const headers = {
     "Content-Type": "application/json",
-    "Access-Control-Allow-Origin": "*",
+    ...(APP_URL ? { "Access-Control-Allow-Origin": APP_URL } : {}),
   };
 
   // Surfaced in error responses so a user can quote it to support and we can
@@ -62,9 +71,21 @@ module.exports.handler = async (event, context) => {
 
   let lockedSchedule = null;
 
+  // Parsed BEFORE the main try. Inside it, a malformed body throws into the
+  // catch-all at the bottom and surfaces as a 500 -- telling the caller the
+  // server broke when in fact their request did, and counting as a genuine
+  // Lambda error in the metrics #12 wants to alarm on.
+  let body;
   try {
-    const body = JSON.parse(event.body || "{}");
+    body = JSON.parse(event.body || "{}");
+  } catch {
+    return errorResponse({
+      headers, requestId, statusCode: 400, code: CODES.MALFORMED_JSON,
+      message: "Request body is not valid JSON.",
+    });
+  }
 
+  try {
     const {
       imageKey,          // S3 key of the uploaded prescription image (legacy single-image path)
       imageKeys,         // S3 keys of uploaded prescription images (multi-page path)

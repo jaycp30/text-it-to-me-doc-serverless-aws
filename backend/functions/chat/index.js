@@ -11,6 +11,15 @@ const { BedrockRuntimeClient, InvokeModelCommand } = require("@aws-sdk/client-be
 const bedrock = new BedrockRuntimeClient({ region: process.env.AWS_REGION });
 const MODEL_ID = process.env.BEDROCK_MODEL_ID;
 
+// Scoped to the app origin rather than "*". The HttpApi's own CorsConfiguration
+// is already locked to AppUrl, but these per-response headers are what a browser
+// actually reads, so a wildcard here quietly widens what the template claims.
+//
+// Omitted entirely when APP_URL is unset rather than sent as "null": "null" is a
+// real origin a browser will match (sandboxed iframes, some redirect and data:
+// contexts), so it fails open where omitting fails closed.
+const APP_URL = process.env.APP_URL || "";
+
 const systemPrompt = (rx) => `You are a friendly medication helper for "Text it To Me Doc".
 Be warm, clear and concise — 8th-grade reading level.
 
@@ -30,11 +39,23 @@ Rules:
 module.exports.handler = async (event) => {
   const headers = {
     "Content-Type": "application/json",
-    "Access-Control-Allow-Origin": "*",
+    ...(APP_URL ? { "Access-Control-Allow-Origin": APP_URL } : {}),
   };
 
+  // Parsed before the main try: inside it a malformed body would hit the
+  // catch-all and return 500, blaming the server for the caller's bad request.
+  let body;
   try {
-    const body = JSON.parse(event.body || "{}");
+    body = JSON.parse(event.body || "{}");
+  } catch {
+    return {
+      statusCode: 400,
+      headers,
+      body: JSON.stringify({ error: "Request body is not valid JSON.", code: "MALFORMED_JSON" }),
+    };
+  }
+
+  try {
     const { message, history = [], prescription } = body;
 
     if (!message) {
