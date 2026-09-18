@@ -67,6 +67,8 @@ function response(statusCode, payload, http = true) {
   };
 }
 
+// Only an HTTP invocation carries a body to parse; Scheduler, worker and
+// dailySummary invocations hand over an object directly and cannot throw here.
 function getPayload(event) {
   if (!isHttpEvent(event)) return event;
   return JSON.parse(event.body || "{}");
@@ -178,8 +180,16 @@ module.exports.handler = async (event) => {
   // the deliberate masking in sendSms/sendEmail below. Log the shape only.
   console.log(`NotifyUser invoked via ${http ? "http" : "scheduler"}`);
 
+  // Parsed before the main try: inside it a malformed body would hit the
+  // catch-all and return 500, blaming the server for the caller's bad request.
+  let payload;
   try {
-    const payload = getPayload(event);
+    payload = getPayload(event);
+  } catch {
+    return response(400, { error: "Request body is not valid JSON.", code: "MALFORMED_JSON" }, http);
+  }
+
+  try {
     const {
       userId,
       notificationMethod, // "sms" | "email"

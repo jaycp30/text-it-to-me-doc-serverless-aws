@@ -4,6 +4,29 @@ import { CODES, ProcessingError, errorResponse } from "../functions/processPresc
 
 const HEADERS = { "Content-Type": "application/json" };
 
+describe("MALFORMED_JSON", () => {
+  it("is in the catalog", () => {
+    // A request body that is not JSON is the caller's fault, so it needs a
+    // stable 400 code rather than falling through to the handler's catch-all
+    // and surfacing as a 500.
+    expect(CODES.MALFORMED_JSON).toBe("MALFORMED_JSON");
+  });
+
+  it("builds a 400 response carrying the code", () => {
+    const res = errorResponse({
+      headers: { "Content-Type": "application/json" },
+      statusCode: 400,
+      code: CODES.MALFORMED_JSON,
+      message: "Request body is not valid JSON.",
+      requestId: "req-1",
+    });
+    expect(res.statusCode).toBe(400);
+    const body = JSON.parse(res.body);
+    expect(body.code).toBe("MALFORMED_JSON");
+    expect(body.requestId).toBe("req-1");
+  });
+});
+
 describe("CODES catalog", () => {
   it("is frozen so typos throw instead of producing undefined codes", () => {
     expect(Object.isFrozen(CODES)).toBe(true);

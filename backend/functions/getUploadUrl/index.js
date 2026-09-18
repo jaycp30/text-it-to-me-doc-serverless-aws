@@ -70,8 +70,20 @@ module.exports.handler = async (event, context) => {
   };
   const requestId = context?.awsRequestId;
 
+  // Parsed before the main try: inside it a malformed body would hit the
+  // catch-all and return 500, blaming the server for the caller's bad request.
+  let body;
   try {
-    const body = JSON.parse(event.body || "{}");
+    body = JSON.parse(event.body || "{}");
+  } catch {
+    return {
+      statusCode: 400,
+      headers,
+      body: JSON.stringify({ error: "Request body is not valid JSON.", code: "MALFORMED_JSON", requestId }),
+    };
+  }
+
+  try {
     // Note the absence of `userId`. Anything the caller says about who they are
     // is ignored; identity comes from the signed token or is minted fresh below.
     const { sessionToken, contentType, uploadId, pageNumber } = body;
