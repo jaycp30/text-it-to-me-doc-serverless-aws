@@ -696,6 +696,36 @@ redirects on the third (a loop would show here).
 **This rule is not in `template.yaml`.** The SAM stack covers the backend; the
 Amplify app is configured by hand, so recreating it would lose this redirect.
 
+#### Why a redirect, and not one of the obvious alternatives
+
+- **Do not password-protect the default domain.** Amplify access control is
+  scoped to a *branch*, not a domain, and `main` serves both addresses — turning
+  it on would put a password prompt on the live site. There is no way to
+  restrict only the default domain.
+- **Deleting the default domain is not possible.** Amplify ties it to the app.
+- **Do not simply add the default origin to `AllowOrigins` so both work.** This
+  looks like the friendly option and is the worst one. Identity here is
+  `localStorage`, which is origin-scoped, so two working origins let one person
+  hold two separate identities — two sets of prescriptions and reminders,
+  invisible to each other. Someone could cancel reminders on one origin while
+  the other kept firing. The goal is convergence, not coexistence.
+- **`robots.txt` and a canonical link are worth adding**, but neither addresses
+  direct access, so they do not replace the redirect.
+
+#### Why 301 rather than 302
+
+301 is cached by browsers indefinitely, so it is sticky: the default domain stays
+unreachable for anyone who cached it, even if the rule is later removed. That
+would normally argue for 302.
+
+It costs nothing here, because the app **cannot function** on the default domain
+anyway — the API's CORS is locked to `AppUrl`, so its break-glass value is
+already zero. If the custom domain ever failed, `AppUrl` would need changing and
+a redeploy regardless, and the redirect would change in the same step.
+
+If that CORS constraint is ever relaxed, revisit this: the argument for 301
+rests on it, not on redirect semantics.
+
 ---
 
 ## Step 7 — Known limitations (the app→backend happy path)
