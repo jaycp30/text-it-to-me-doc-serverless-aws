@@ -36,6 +36,15 @@ const s3 = new S3Client({});
 const IMAGES_BUCKET = process.env.IMAGES_BUCKET;
 const MAGIC_LINK_SECRET = process.env.MAGIC_LINK_SECRET || "";
 
+// Scoped to the app origin rather than "*". The HttpApi's own CorsConfiguration
+// is already locked to AppUrl, but these per-response headers are what a browser
+// actually reads, so a wildcard here quietly widens what the template claims.
+//
+// Omitted entirely when APP_URL is unset rather than sent as "null": "null" is a
+// real origin a browser will match (sandboxed iframes, some redirect and data:
+// contexts), so it fails open where omitting fails closed.
+const APP_URL = process.env.APP_URL || "";
+
 // Allowed image types
 const ALLOWED_CONTENT_TYPES = [
   "image/jpeg",
@@ -57,7 +66,7 @@ function safeSegment(value) {
 module.exports.handler = async (event, context) => {
   const headers = {
     "Content-Type": "application/json",
-    "Access-Control-Allow-Origin": "*",
+    ...(APP_URL ? { "Access-Control-Allow-Origin": APP_URL } : {}),
   };
   const requestId = context?.awsRequestId;
 

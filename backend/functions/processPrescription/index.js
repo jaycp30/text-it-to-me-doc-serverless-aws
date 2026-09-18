@@ -49,11 +49,20 @@ const lambda = new LambdaClient({});
 const { SCHEDULES_TABLE, WORKER_FUNCTION_ARN } = process.env;
 const MAGIC_LINK_SECRET = process.env.MAGIC_LINK_SECRET || "";
 
+// Scoped to the app origin rather than "*". The HttpApi's own CorsConfiguration
+// is already locked to AppUrl, but these per-response headers are what a browser
+// actually reads, so a wildcard here quietly widens what the template claims.
+//
+// Omitted entirely when APP_URL is unset rather than sent as "null": "null" is a
+// real origin a browser will match (sandboxed iframes, some redirect and data:
+// contexts), so it fails open where omitting fails closed.
+const APP_URL = process.env.APP_URL || "";
+
 // ─── Handler ──────────────────────────────────────────────────────────────────
 module.exports.handler = async (event, context) => {
   const headers = {
     "Content-Type": "application/json",
-    "Access-Control-Allow-Origin": "*",
+    ...(APP_URL ? { "Access-Control-Allow-Origin": APP_URL } : {}),
   };
 
   // Surfaced in error responses so a user can quote it to support and we can
