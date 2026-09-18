@@ -643,6 +643,89 @@ Amplify works through three stages automatically (no manual DNS edits needed):
 
 > For full details and context, see the [[Custom Domain Setup|Custom-Domain-Setup]] wiki page.
 
+### Redirecting the default domain to the custom one
+
+Because Amplify serves both addresses, the app was publicly reachable at two
+origins — and only one of them worked. `RxApi`'s `CorsConfiguration` and the S3
+bucket's `CorsRules` both allow only `!Ref AppUrl`, so a browser loading the app
+from `main.d3bj6u7583ielg.amplifyapp.com` got a page that rendered perfectly and
+then had every API call blocked, with nothing on screen explaining why. Identity
+lives in `localStorage`, which is origin-scoped, so any session built up there
+was invisible from the real domain too.
+
+A host-level 301 makes the two converge (issue #42):
+
+```bash
+aws amplify update-app --app-id d3bj6u7583ielg --region ap-northeast-1 \
+  --custom-rules '[
+    {"source":"https://main.d3bj6u7583ielg.amplifyapp.com","target":"https://textit2medoc.jaycloud.net","status":"301"},
+    {"source":"/<*>","target":"/index.html","status":"404-200"}
+  ]'
+```
+
+Four things about this are easy to get wrong:
+
+1. **`--custom-rules` replaces the whole list.** The SPA rewrite must be passed
+   again or it is lost, and deep links stop working.
+2. **Order matters** — rules apply top-down, so the host redirect goes first.
+3. **No path on a domain rule.** Per the AWS docs a domain-scoped `source` must
+   not contain a path: `"https://example.com/some-path"` is *silently ignored*,
+   with no error. A bare domain is correct, and paths and query strings are
+   appended automatically. Query strings matter here — email links carry
+   `?delete=` and `?token=`.
+4. **Expect a stale root.** CloudFront caches responses with
+   `s-maxage=31536000`, so straight after the change deep links redirected while
+   `/` still returned a cached 200 — and a cache-busting query string did not
+   bypass it. Force a release to invalidate:
+
+```bash
+aws amplify start-job --app-id d3bj6u7583ielg --branch-name main --job-type RELEASE --region ap-northeast-1
+```
+
+Verify the **root** specifically, not just a deep link, or this passes falsely:
+
+```bash
+curl -s -o /dev/null -w '%{http_code} -> %{redirect_url}\n' https://main.d3bj6u7583ielg.amplifyapp.com/
+curl -s -o /dev/null -w '%{http_code} -> %{redirect_url}\n' 'https://main.d3bj6u7583ielg.amplifyapp.com/?delete=x&token=y'
+curl -s -o /dev/null -w '%{http_code} redirects:%{num_redirects}\n' -L https://textit2medoc.jaycloud.net/
+```
+
+Expect 301 on the first two with the query string intact, and 200 with zero
+redirects on the third (a loop would show here).
+
+**This rule is not in `template.yaml`.** The SAM stack covers the backend; the
+Amplify app is configured by hand, so recreating it would lose this redirect.
+
+#### Why a redirect, and not one of the obvious alternatives
+
+- **Do not password-protect the default domain.** Amplify access control is
+  scoped to a *branch*, not a domain, and `main` serves both addresses — turning
+  it on would put a password prompt on the live site. There is no way to
+  restrict only the default domain.
+- **Deleting the default domain is not possible.** Amplify ties it to the app.
+- **Do not simply add the default origin to `AllowOrigins` so both work.** This
+  looks like the friendly option and is the worst one. Identity here is
+  `localStorage`, which is origin-scoped, so two working origins let one person
+  hold two separate identities — two sets of prescriptions and reminders,
+  invisible to each other. Someone could cancel reminders on one origin while
+  the other kept firing. The goal is convergence, not coexistence.
+- **`robots.txt` and a canonical link are worth adding**, but neither addresses
+  direct access, so they do not replace the redirect.
+
+#### Why 301 rather than 302
+
+301 is cached by browsers indefinitely, so it is sticky: the default domain stays
+unreachable for anyone who cached it, even if the rule is later removed. That
+would normally argue for 302.
+
+It costs nothing here, because the app **cannot function** on the default domain
+anyway — the API's CORS is locked to `AppUrl`, so its break-glass value is
+already zero. If the custom domain ever failed, `AppUrl` would need changing and
+a redeploy regardless, and the redirect would change in the same step.
+
+If that CORS constraint is ever relaxed, revisit this: the argument for 301
+rests on it, not on redirect semantics.
+
 ---
 
 ## Step 7 — Known limitations (the app→backend happy path)
