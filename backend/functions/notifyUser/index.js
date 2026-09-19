@@ -27,25 +27,20 @@ const {
 const sns = new SNSClient({});
 const ses = new SESClient({});
 
-const SES_FROM_EMAIL       = process.env.SES_FROM_EMAIL       || "noreply@rxreader.app";
-// NOTE: this fallback is a stale Amplify default, not the live custom domain.
-// It only bites if APP_URL is ever unset (it is set for every function via the
-// template Globals), but if that happened every email link would point at the
-// wrong host. Left alone here as out of scope — see the note in issue #39.
-const APP_URL              = process.env.APP_URL              || "https://main.d3bj6u7583ielg.amplifyapp.com";
-
-// Deliberately NOT APP_URL: that constant carries the stale fallback above, and
-// advertising a stale origin as trusted is exactly the kind of drift issue #39
-// is about. A strict read means an unset APP_URL omits the header entirely,
-// which fails closed.
-const CORS_ORIGIN          = process.env.APP_URL || "";
+// No hardcoded fallbacks for either of these. Both are required configuration
+// that must match external state this code cannot see -- SES_FROM_EMAIL has to
+// be an identity verified in SES, and APP_URL has to be the origin the API's
+// CORS actually allows. Guessing a value hides a deployment fault behind emails
+// that look fine, so sendEmail refuses instead (#43, #45).
+const SES_FROM_EMAIL       = process.env.SES_FROM_EMAIL || "";
+const APP_URL              = process.env.APP_URL || "";
 const TURNSTILE_SECRET_KEY = process.env.TURNSTILE_SECRET_KEY || "";
 const MAGIC_LINK_SECRET    = process.env.MAGIC_LINK_SECRET    || "";
 const TURNSTILE_VERIFY_URL = "https://challenges.cloudflare.com/turnstile/v0/siteverify";
 
 const RESPONSE_HEADERS = {
   "Content-Type": "application/json",
-  ...(CORS_ORIGIN ? { "Access-Control-Allow-Origin": CORS_ORIGIN } : {}),
+  ...(APP_URL ? { "Access-Control-Allow-Origin": APP_URL } : {}),
 };
 
 // SECURITY-CRITICAL. Two protections below key off this: Turnstile only runs
@@ -140,6 +135,24 @@ async function sendSMS(phoneNumber, message) {
 }
 
 async function sendEmail(emailAddress, subject, bodyText, emailData = {}, userId = "") {
+  // Refuse rather than guess. Sending from an unverified identity is rejected by
+  // SES anyway; building links against a wrong origin is worse, because the mail
+  // goes out looking correct and only fails later in the recipient's browser.
+  //
+  // Deliberately here and not at handler start: an SMS reminder needs neither
+  // value, and a missing email config must not take out SMS delivery too.
+  //
+  // Throwing lands in the handler's catch, which logs and returns without
+  // rethrowing -- that is intentional, so EventBridge does not retry and spam
+  // the user with a fault no retry can fix.
+  const missing = [
+    !SES_FROM_EMAIL && "SES_FROM_EMAIL",
+    !APP_URL && "APP_URL",
+  ].filter(Boolean);
+  if (missing.length > 0) {
+    throw new Error(`Cannot send email: ${missing.join(" and ")} not configured`);
+  }
+
   const htmlBody = buildHtmlEmail(
     { bodyText, userId, ...emailData },
     { appUrl: APP_URL, secret: MAGIC_LINK_SECRET },
