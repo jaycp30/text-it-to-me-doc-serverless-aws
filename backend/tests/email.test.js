@@ -88,6 +88,31 @@ describe("buildHtmlEmail — session & unsubscribe links in the template", () =>
     expect(html).toContain("Unsubscribe");
   });
 
+  it("gives a human contact route, not just an unsubscribe link", () => {
+    // The footer says "Do not reply to this email". Before #28 it offered no
+    // alternative, so a reminder was a dead end for anyone with a question or a
+    // data-rights request.
+    const html = buildHtmlEmail(
+      { type: "dose", userId: USER_ID, dose: { medication: "amoxicillin", amount: 1, unit: "capsule", time: "08:00" } },
+      { ...CONFIG, contactEmail: "privacy@example.net" },
+    );
+    expect(html).toContain("mailto:privacy@example.net");
+    expect(html).toContain("Do not reply to this email");
+  });
+
+  it("omits the contact line when no address is configured, and still sends", () => {
+    // Deliberately NOT the same policy as SES_FROM_EMAIL / APP_URL, which refuse
+    // to send. A medication reminder must still go out when only the contact
+    // line is unconfigured -- the reminder is the point.
+    const html = buildHtmlEmail(
+      { type: "dose", userId: USER_ID, dose: { medication: "amoxicillin", amount: 1, unit: "capsule", time: "08:00" } },
+      CONFIG,
+    );
+    expect(html).not.toContain("mailto:");
+    expect(html).toContain("<!DOCTYPE html>");
+    expect(html).toContain("Do not reply to this email");
+  });
+
   it("offers erasure alongside unsubscribe in the footer", () => {
     // Art. 17 has to be as reachable as opting out, not buried in the policy.
     const deleteDataUrl = buildDeleteDataUrl(USER_ID, CONFIG);

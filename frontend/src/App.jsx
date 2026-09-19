@@ -320,6 +320,11 @@ const GITHUB_URL  = 'https://github.com/jaycp30/text-it-to-me-doc-serverless-aws
 // Bump this to match the "Last updated" date whenever public/privacy.html
 // changes in a way that affects how health data is handled.
 const POLICY_VERSION = '2026-09-17';
+// Published contact route (#28). Hardcoded here, as in privacy.html and
+// terms.html, because it is user-facing legal text rather than deployment
+// config. The email template takes it from CONTACT_EMAIL instead, since
+// notifyUser already reads all of its configuration from the environment.
+const CONTACT_EMAIL = 'jay.clemen@outlook.com';
 const MAX_UPLOAD_IMAGES = 5;
 
 const PROCESSING_STAGES = {
@@ -3671,6 +3676,12 @@ function LegalFooter({ isDesktop = false }) {
       <a href="/privacy.html" style={link}>Privacy Policy</a>
       <span aria-hidden="true" style={{ color: 'var(--text3)', fontSize: 12 }}>·</span>
       <a href="/terms.html" style={link}>Terms of Service</a>
+      <span aria-hidden="true" style={{ color: 'var(--text3)', fontSize: 12 }}>·</span>
+      {/* Reachable without opening the privacy policy first (#28). This is the
+          only route left for someone who cleared their browser storage: identity
+          is a localStorage id, so clearing it severs them from their own records
+          and no in-app control can reach their data any more. */}
+      <a href={`mailto:${CONTACT_EMAIL}`} style={link}>Contact</a>
     </footer>
   );
 }
