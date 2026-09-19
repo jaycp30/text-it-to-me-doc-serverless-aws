@@ -34,6 +34,12 @@ const ses = new SESClient({});
 // that look fine, so sendEmail refuses instead (#43, #45).
 const SES_FROM_EMAIL       = process.env.SES_FROM_EMAIL || "";
 const APP_URL              = process.env.APP_URL || "";
+// The address users can write to about their data or to report a problem (#28).
+// Unlike SES_FROM_EMAIL and APP_URL this is NOT required to send: if it is
+// missing the footer simply omits the line. Refusing to send a medication
+// reminder because a contact line is unconfigured would be the wrong trade --
+// the reminder is the point, the contact line is an addition to it.
+const CONTACT_EMAIL        = process.env.CONTACT_EMAIL || "";
 const TURNSTILE_SECRET_KEY = process.env.TURNSTILE_SECRET_KEY || "";
 const MAGIC_LINK_SECRET    = process.env.MAGIC_LINK_SECRET    || "";
 const TURNSTILE_VERIFY_URL = "https://challenges.cloudflare.com/turnstile/v0/siteverify";
@@ -155,7 +161,7 @@ async function sendEmail(emailAddress, subject, bodyText, emailData = {}, userId
 
   const htmlBody = buildHtmlEmail(
     { bodyText, userId, ...emailData },
-    { appUrl: APP_URL, secret: MAGIC_LINK_SECRET },
+    { appUrl: APP_URL, secret: MAGIC_LINK_SECRET, contactEmail: CONTACT_EMAIL },
   );
 
   const command = new SendEmailCommand({

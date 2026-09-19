@@ -122,6 +122,7 @@ function formatSubscribedMessage({ medications = [], dosesScheduled = 0, userTim
  * @param {{ appUrl: string, secret?: string }} config
  */
 function buildHtmlEmail({ type, bodyText, dose, doses, medications, dosesScheduled, userTimezone, userId }, config = {}) {
+  const { contactEmail } = config;
   // ── Inner content varies by message type ──────────────────────────────────
 
   const sessionUrl     = buildSessionUrl(userId, config);
@@ -267,7 +268,9 @@ function buildHtmlEmail({ type, bodyText, dose, doses, medications, dosesSchedul
           <tr>
             <td style="background-color:#f9faf9;border-top:1px solid #eaeaea;border-radius:0 0 12px 12px;padding:20px 36px;">
               <p style="margin:0 0 6px;font-size:12px;color:#aaa;line-height:1.6;">
-                This is an automated medication reminder from RxReader. Do not reply to this email.
+                This is an automated medication reminder from RxReader. Do not reply to this email.${contactEmail ? `
+                Questions about your data, or something wrong? Email
+                <a href="mailto:${contactEmail}" style="color:#2d6a4f;text-decoration:underline;">${contactEmail}</a>.` : ""}
               </p>
               ${unsubscribeUrl ? `<p style="margin:0;font-size:12px;line-height:1.6;">
                 <a href="${unsubscribeUrl}" style="color:#2d6a4f;text-decoration:underline;">Unsubscribe</a>

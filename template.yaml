@@ -52,6 +52,17 @@ Parameters:
     Description: Secret used to HMAC-sign session tokens embedded in email magic links. Must be at least 32 random characters.
     Default: ""
 
+  ContactEmail:
+    Type: String
+    Default: "jay.clemen@outlook.com"
+    Description: >
+      Address users can write to about their data (access, correction, erasure)
+      and to report a problem. Published in the app footer, the legal pages and
+      the footer of every transactional email, so it must be an inbox that is
+      actually monitored — GDPR allows one month to answer a rights request.
+      A role address on a domain you control is better than a personal inbox,
+      but only once it can genuinely receive mail.
+
   AppUrl:
     Type: String
     Description: >
@@ -391,6 +402,7 @@ Resources:
           SES_FROM_EMAIL:       !Ref SesFromEmail
           TURNSTILE_SECRET_KEY: !Ref TurnstileSecretKey
           MAGIC_LINK_SECRET:    !Ref MagicLinkSecret
+          CONTACT_EMAIL:        !Ref ContactEmail
       Events:
         TestNotification:
           Type: HttpApi
